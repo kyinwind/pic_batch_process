@@ -29,29 +29,32 @@ import os
 #
 # -------------------------------------------
 
-
 # 输入输出文件夹
 input_folder = "input_images"
 output_folder = "output_images"
 os.makedirs(output_folder, exist_ok=True)
 
-# 读取第一张图片（用于调节参数）
 file_list = [f for f in os.listdir(input_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
 if not file_list:
     raise FileNotFoundError("⚠️ 没有在 input_images 文件夹中找到图片！")
-img = cv2.imread(os.path.join(input_folder, file_list[0]))
-hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-compare_mode = 'horizontal'  # 'horizontal'（左右）或'vertical'（上下）
+img_index = 0
+def load_img(idx):
+    img = cv2.imread(os.path.join(input_folder, file_list[idx]))
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    return img, hsv
 
+img, hsv = load_img(img_index)
 
-# 回调函数（空的即可）
+compare_mode = 'horizontal'  # 'horizontal' 或 'vertical'
+output_mode = 0  # 0=白底, 1=叠加, 2=掩码
+
 def nothing(x):
     pass
 
-# 创建窗口和滑动条
 cv2.namedWindow("Adjust HSV")
 
+# Trackbar 参数（和你原来一样）
 cv2.createTrackbar("LowH1", "Adjust HSV", 0, 180, nothing)
 cv2.createTrackbar("HighH1", "Adjust HSV", 10, 180, nothing)
 cv2.createTrackbar("LowS1", "Adjust HSV", 80, 255, nothing)
@@ -82,31 +85,45 @@ while True:
     lowV2 = cv2.getTrackbarPos("LowV2", "Adjust HSV")
     highV2 = cv2.getTrackbarPos("HighV2", "Adjust HSV")
 
-    # 定义两个红色范围
+    # 定义红色范围
     lower_red1 = np.array([lowH1, lowS1, lowV1])
     upper_red1 = np.array([highH1, highS1, highV1])
     lower_red2 = np.array([lowH2, lowS2, lowV2])
     upper_red2 = np.array([highH2, highS2, highV2])
 
-    # 生成掩码
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
 
-    # 生成纯白背景并保留红字
-    cleaned = np.ones_like(img) * 255
-    cleaned[mask > 0] = img[mask > 0]
+    # 小膨胀/闭运算，修复缺口
+    kernel = np.ones((3,3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # 显示预览
+    # 三种输出模式
+    if output_mode == 0:  
+        # 模式1: 白底红字
+        cleaned = np.ones_like(img) * 255
+        cleaned[mask > 0] = img[mask > 0]
+    elif output_mode == 1:  
+        # 模式2: 原图叠加（只保留红字，背景淡化）
+        background = np.ones_like(img) * 255
+        red_only = cv2.bitwise_and(img, img, mask=mask)
+        cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
+    else:  
+        # 模式3: 纯掩码
+        cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+    # 显示
     if compare_mode == 'horizontal':
         preview = np.hstack((img, cleaned))
     else:
         preview = np.vstack((img, cleaned))
+
     cv2.imshow("Adjust HSV", preview)
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord('s'):  
-        # 保存所有图片
         for filename in file_list:
             filepath = os.path.join(input_folder, filename)
             img = cv2.imread(filepath)
@@ -115,22 +132,40 @@ while True:
             mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
             mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
             mask = cv2.bitwise_or(mask1, mask2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.dilate(mask, kernel, iterations=1)
 
-            cleaned = np.ones_like(img) * 255
-            cleaned[mask > 0] = img[mask > 0]
+            if output_mode == 0:
+                cleaned = np.ones_like(img) * 255
+                cleaned[mask > 0] = img[mask > 0]
+            elif output_mode == 1:
+                background = np.ones_like(img) * 255
+                red_only = cv2.bitwise_and(img, img, mask=mask)
+                cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
+            else:
+                cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-            savepath = os.path.join(output_folder, filename)
-            #cv2.imwrite(savepath, cleaned)
-            cv2.imwrite(savepath, cleaned, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-            print(f"✅ 已保存: {filename}")
+            savepath = os.path.join(output_folder, os.path.splitext(filename)[0] + ".png")
+            cv2.imwrite(savepath, cleaned)  # 保存为无损PNG
+            print(f"✅ 已保存: {savepath}")
         print("🎉 所有图片处理完成！")
         break
-    elif key == ord('q'):  
+    elif key == ord('q'):
         print("❌ 用户退出。")
         break
     elif key == ord('c'):
-        # 切换比较模式
         compare_mode = 'vertical' if compare_mode == 'horizontal' else 'horizontal'
         print(f"🔄 已切换为 {'上下比较' if compare_mode == 'vertical' else '左右比较'}")
+    elif key == ord('m'):
+        output_mode = (output_mode + 1) % 3
+        print(f"🎨 已切换输出模式: {output_mode} ({['白底','叠加','掩码'][output_mode]})")
+    elif key == ord('p'):
+        img_index = (img_index - 1) % len(file_list)
+        img, hsv = load_img(img_index)
+        print(f"⬆️ 切换到上一张：{file_list[img_index]}")
+    elif key == ord('n'):
+        img_index = (img_index + 1) % len(file_list)
+        img, hsv = load_img(img_index)
+        print(f"⬇️ 切换到下一张：{file_list[img_index]}")
 
 cv2.destroyAllWindows()
