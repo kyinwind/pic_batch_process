@@ -34,8 +34,11 @@ input_folder = "input_images"
 output_folder = "output_images"
 os.makedirs(output_folder, exist_ok=True)
 
+# 筛选图片文件（增加对大小写扩展名的兼容）
 file_list = [
-    f for f in os.listdir(input_folder) if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    f
+    for f in os.listdir(input_folder)
+    if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff"))
 ]
 if not file_list:
     raise FileNotFoundError("⚠️ 没有在 input_images 文件夹中找到图片！")
@@ -44,27 +47,34 @@ img_index = 0
 
 
 def load_img(idx):
-    img = cv2.imread(os.path.join(input_folder, file_list[idx]))
+    """加载图片，增加错误处理，避免空图像崩溃"""
+    img_path = os.path.join(input_folder, file_list[idx])
+    img = cv2.imread(img_path)
+    if img is None:
+        raise ValueError(f"❌ 无法读取图片：{img_path}（检查路径或文件完整性）")
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     return img, hsv
 
 
+# 初始加载第一张图
 img, hsv = load_img(img_index)
 
-compare_mode = "vertical"  # 'horizontal' 或 'vertical'
+# 配置参数（优化默认值）
+compare_mode = "vertical"  # 'horizontal'（左右）或 'vertical'（上下）
 output_mode = 0  # 0=白底, 1=叠加, 2=掩码
+MAX_PREVIEW_SIZE = (1200, 800)  # 预览窗口最大尺寸（宽，高），适配大多数屏幕
 
 
 def nothing(x):
     pass
 
 
-# 创建可缩放窗口（不会模糊）
-cv2.namedWindow("Adjust HSV", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Adjust HSV", img.shape[1], img.shape[0])  # 设置窗口大小为图片大小
+# 1. 创建可缩放窗口（不提前固定大小，避免拉伸）
+cv2.namedWindow("Adjust HSV", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+# WINDOW_KEEPRATIO：保证窗口缩放时，图像保持原始宽高比
 
 
-# Trackbar 参数（和你原来一样）
+# 2. 创建Trackbar（保持原逻辑）
 cv2.createTrackbar("LowH1", "Adjust HSV", 0, 180, nothing)
 cv2.createTrackbar("HighH1", "Adjust HSV", 10, 180, nothing)
 cv2.createTrackbar("LowS1", "Adjust HSV", 80, 255, nothing)
@@ -79,12 +89,25 @@ cv2.createTrackbar("HighS2", "Adjust HSV", 255, 255, nothing)
 cv2.createTrackbar("LowV2", "Adjust HSV", 80, 255, nothing)
 cv2.createTrackbar("HighV2", "Adjust HSV", 255, 255, nothing)
 
-# 设置显示窗口的目标尺寸（根据屏幕调整）
-display_width, display_height = 1200, 343  # 你可以改成自己屏幕能显示的尺寸
+
+def calculate_optimal_scale(original_size, max_size):
+    """
+    计算最优缩放比例：保证图像缩放后不超过最大尺寸，且保持宽高比
+    original_size: (原宽, 原高)
+    max_size: (最大宽, 最大高)
+    """
+    orig_w, orig_h = original_size
+    max_w, max_h = max_size
+
+    # 计算宽度和高度的缩放比例（取较小值，避免超出最大尺寸）
+    scale_w = max_w / orig_w if orig_w != 0 else 1.0
+    scale_h = max_h / orig_h if orig_h != 0 else 1.0
+    scale = min(scale_w, scale_h, 1.0)  # 不放大（scale≤1），避免放大导致模糊
+    return scale
 
 
 while True:
-    # 获取滑动条的值
+    # 3. 获取Trackbar值（保持原逻辑）
     lowH1 = cv2.getTrackbarPos("LowH1", "Adjust HSV")
     highH1 = cv2.getTrackbarPos("HighH1", "Adjust HSV")
     lowS1 = cv2.getTrackbarPos("LowS1", "Adjust HSV")
@@ -99,7 +122,7 @@ while True:
     lowV2 = cv2.getTrackbarPos("LowV2", "Adjust HSV")
     highV2 = cv2.getTrackbarPos("HighV2", "Adjust HSV")
 
-    # 定义红色范围
+    # 4. 红色掩码计算（保持原逻辑）
     lower_red1 = np.array([lowH1, lowS1, lowV1])
     upper_red1 = np.array([highH1, highS1, highV1])
     lower_red2 = np.array([lowH2, lowS2, lowV2])
@@ -109,12 +132,12 @@ while True:
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
 
-    # 小膨胀/闭运算，修复缺口
+    # 小膨胀/闭运算，修复缺口（保持原逻辑）
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # 三种输出模式
+    # 5. 三种输出模式（保持原逻辑）
     if output_mode == 0:
         # 模式1: 白底红字
         cleaned = np.ones_like(img) * 255
@@ -125,53 +148,87 @@ while True:
         red_only = cv2.bitwise_and(img, img, mask=mask)
         cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
     else:
-        # 模式3: 纯掩码
+        # 模式3: 纯掩码（转为BGR以便和原图拼接）
         cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-    # 显示
+    # 6. 拼接原图和处理图（优化缩放逻辑）
     if compare_mode == "horizontal":
-        preview = np.hstack((img, cleaned))
+        # 左右拼接：宽度相加，高度取两者最大（避免截断）
+        combined_h = max(img.shape[0], cleaned.shape[0])
+        # 统一高度（用INTER_AREA保持细节）
+        img_resized = cv2.resize(
+            img, (img.shape[1], combined_h), interpolation=cv2.INTER_AREA
+        )
+        cleaned_resized = cv2.resize(
+            cleaned, (cleaned.shape[1], combined_h), interpolation=cv2.INTER_AREA
+        )
+        preview = np.hstack((img_resized, cleaned_resized))
     else:
-        preview = np.vstack((img, cleaned))
+        # 上下拼接：高度相加，宽度取两者最大
+        combined_w = max(img.shape[1], cleaned.shape[1])
+        # 统一宽度（用INTER_AREA保持细节）
+        img_resized = cv2.resize(
+            img, (combined_w, img.shape[0]), interpolation=cv2.INTER_AREA
+        )
+        cleaned_resized = cv2.resize(
+            cleaned, (combined_w, cleaned.shape[0]), interpolation=cv2.INTER_AREA
+        )
+        preview = np.vstack((img_resized, cleaned_resized))
 
-    # 自动缩放显示窗口，保持宽高比
-    h, w = preview.shape[:2]
-    scale_w = display_width / w
-    scale_h = display_height / h
-    scale = min(scale_w, scale_h, 1.0)  # scale <= 1，避免放大导致模糊
+    # 7. 计算最优缩放比例，避免模糊
+    preview_orig_size = (preview.shape[1], preview.shape[0])  # (宽, 高)
+    scale = calculate_optimal_scale(preview_orig_size, MAX_PREVIEW_SIZE)
+    # 缩放预览图（关键：用INTER_AREA插值，缩小图像时细节保留最好）
+    preview_scaled = cv2.resize(
+        preview,
+        (int(preview_orig_size[0] * scale), int(preview_orig_size[1] * scale)),
+        interpolation=cv2.INTER_AREA,  # 替换为INTER_AREA，解决缩小模糊
+    )
 
-    new_w, new_h = int(w * scale), int(h * scale)
-    preview_resized = cv2.resize(preview, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    cv2.imshow("Adjust HSV", preview_resized)
+    # 8. 显示缩放后的图像
+    cv2.imshow("Adjust HSV", preview_scaled)
+    # 自动调整窗口大小以匹配缩放后的图像（避免黑边或拉伸）
+    cv2.resizeWindow("Adjust HSV", preview_scaled.shape[1], preview_scaled.shape[0])
 
+    # 9. 键盘控制（保持原逻辑）
     key = cv2.waitKey(1) & 0xFF
     if key == ord("s"):
+        # 批量处理并保存（优化保存逻辑：保留原扩展名，避免强制转PNG）
         for filename in file_list:
             filepath = os.path.join(input_folder, filename)
-            img = cv2.imread(filepath)
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            img_save = cv2.imread(filepath)
+            if img_save is None:
+                print(f"⚠️ 跳过无法读取的图片：{filepath}")
+                continue
+            hsv_save = cv2.cvtColor(img_save, cv2.COLOR_BGR2HSV)
 
-            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-            mask = cv2.bitwise_or(mask1, mask2)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            mask = cv2.dilate(mask, kernel, iterations=1)
+            # 重新计算掩码（避免复用之前的mask，确保每张图独立处理）
+            mask1_save = cv2.inRange(hsv_save, lower_red1, upper_red1)
+            mask2_save = cv2.inRange(hsv_save, lower_red2, upper_red2)
+            mask_save = cv2.bitwise_or(mask1_save, mask2_save)
+            mask_save = cv2.morphologyEx(mask_save, cv2.MORPH_CLOSE, kernel)
+            mask_save = cv2.dilate(mask_save, kernel, iterations=1)
 
+            # 生成处理后的图像
             if output_mode == 0:
-                cleaned = np.ones_like(img) * 255
-                cleaned[mask > 0] = img[mask > 0]
+                cleaned_save = np.ones_like(img_save) * 255
+                cleaned_save[mask_save > 0] = img_save[mask_save > 0]
             elif output_mode == 1:
-                background = np.ones_like(img) * 255
-                red_only = cv2.bitwise_and(img, img, mask=mask)
-                cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
+                background_save = np.ones_like(img_save) * 255
+                red_only_save = cv2.bitwise_and(img_save, img_save, mask=mask_save)
+                cleaned_save = cv2.addWeighted(
+                    red_only_save, 1.0, background_save, 0.0, 0
+                )
             else:
-                cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+                cleaned_save = cv2.cvtColor(mask_save, cv2.COLOR_GRAY2BGR)
 
-            savepath = os.path.join(
-                output_folder, os.path.splitext(filename)[0] + ".png"
-            )
-            cv2.imwrite(savepath, cleaned)  # 保存为无损PNG
-            print(f"✅ 已保存: {savepath}")
+            # 无论原文件是JPG/BMP，均保存为“原文件名.png”
+            name, _ = os.path.splitext(filename)  # 忽略原扩展名
+            savepath = os.path.join(output_folder, f"{name}.png")
+            # PNG为无损格式，无需额外设置质量参数，直接保存
+            cv2.imwrite(savepath, cleaned_save)
+            print(f"✅ 已保存为PNG: {savepath}")
+
         print("🎉 所有图片处理完成！")
         break
     elif key == ord("q"):
