@@ -69,8 +69,11 @@ class HSVImageEditor(QMainWindow):
 
         self.img_index = 0
         self.output_mode = 0
-        self.kernel = np.ones((3, 3), np.uint8)
-
+        #self.kernel = np.ones((3, 3), np.uint8)
+        # 形态学操作的核，用于去灰尘
+        self.morph_kernel = np.ones((3, 3), np.uint8)
+        # 最小连通区域面积，用于过滤小灰尘
+        self.min_area = 50  
         # HSV 默认参数
         self.hsv_params = {
             "H1_low": 0, "H1_high": 10,
@@ -135,9 +138,18 @@ class HSVImageEditor(QMainWindow):
         mask2 = cv2.inRange(self.hsv, lower2, upper2)
         mask = cv2.bitwise_or(mask1, mask2)
 
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
-        mask = cv2.dilate(mask, self.kernel, iterations=1)
+         # 形态学开运算，先腐蚀后膨胀，去除小灰尘
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1)
+        # 闭运算，填充文字内部的小缺口
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1)
+        # 连通区域过滤，去除小面积区域（灰尘）
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        filtered_mask = np.zeros_like(mask)
 
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] > self.min_area:
+                filtered_mask[labels == i] = 255
+        mask = filtered_mask
         if self.output_mode == 0:
             cleaned = np.ones_like(self.img) * 255
             cleaned[mask > 0] = self.img[mask > 0]
@@ -258,10 +270,48 @@ class HSVImageEditor(QMainWindow):
         group2.addWidget(self.create_hsv_group("红色区间2 - H", "H2_"))
         group2.addWidget(self.create_hsv_group("红色区间2 - S", "S2_"))
         group2.addWidget(self.create_hsv_group("红色区间2 - V", "V2_"))
+        
+        # 添加去灰尘相关的控制
+        dust_layout = QVBoxLayout()
+        dust_group = QGroupBox("去灰尘设置")
+        dust_inner_layout = QGridLayout()
+
+        # 形态学核大小滑块
+        kernel_size_label = QLabel("形态学核大小：")
+        self.kernel_size_slider = QSlider(Qt.Horizontal)
+        self.kernel_size_slider.setRange(1, 10)
+        self.kernel_size_slider.setValue(3)
+        self.kernel_size_slider.valueChanged.connect(self.on_kernel_size_change)
+        kernel_size_value_label = QLabel("3")
+        kernel_size_value_label.setAlignment(Qt.AlignRight)
+        kernel_size_value_label.setFixedWidth(50)
+        self.kernel_size_value_label = kernel_size_value_label
+
+        # 最小连通面积滑块
+        min_area_label = QLabel("最小连通面积：")
+        self.min_area_slider = QSlider(Qt.Horizontal)
+        self.min_area_slider.setRange(10, 200)
+        self.min_area_slider.setValue(self.min_area)
+        self.min_area_slider.valueChanged.connect(self.on_min_area_change)
+        min_area_value_label = QLabel(str(self.min_area))
+        min_area_value_label.setAlignment(Qt.AlignRight)
+        min_area_value_label.setFixedWidth(50)
+        self.min_area_value_label = min_area_value_label
+
+        dust_inner_layout.addWidget(kernel_size_label, 0, 0)
+        dust_inner_layout.addWidget(self.kernel_size_slider, 0, 1)
+        dust_inner_layout.addWidget(kernel_size_value_label, 0, 2)
+        dust_inner_layout.addWidget(min_area_label, 1, 0)
+        dust_inner_layout.addWidget(self.min_area_slider, 1, 1)
+        dust_inner_layout.addWidget(min_area_value_label, 1, 2)
+
+        dust_group.setLayout(dust_inner_layout)
+        dust_layout.addWidget(dust_group)
 
         params_layout.addLayout(group1)
         params_layout.addLayout(group2)
-        main_layout.addLayout(params_layout)
+        params_layout.addLayout(dust_layout)  # 将dust_layout添加到params_layout
+        main_layout.addLayout(params_layout)  # 将params_layout添加到main_layout
 
         btn_layout = QHBoxLayout()
         self.prev_btn = QPushButton("上一张（←）")
@@ -281,6 +331,18 @@ class HSVImageEditor(QMainWindow):
         btn_layout.addWidget(self.save_btn)
         btn_layout.addWidget(self.quit_btn)
         main_layout.addLayout(btn_layout)
+
+    def on_kernel_size_change(self, value):
+        # 更新形态学核大小
+        self.morph_kernel = np.ones((value, value), np.uint8)
+        self.kernel_size_value_label.setText(str(value))
+        self.update_processed_image()
+
+    def on_min_area_change(self, value):
+        # 更新最小连通面积
+        self.min_area = value
+        self.min_area_value_label.setText(str(value))
+        self.update_processed_image()
 
     def switch_image(self, step):
         self.img_index = (self.img_index + step) % len(self.file_list)
@@ -313,8 +375,17 @@ class HSVImageEditor(QMainWindow):
             mask1 = cv2.inRange(hsv, lower1, upper1)
             mask2 = cv2.inRange(hsv, lower2, upper2)
             mask = cv2.bitwise_or(mask1, mask2)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
-            mask = cv2.dilate(mask, self.kernel, iterations=1)
+
+            # 应用形态学操作和连通区域过滤（与实时处理一致）
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            filtered_mask = np.zeros_like(mask)
+
+            for i in range(1, num_labels):
+                if stats[i, cv2.CC_STAT_AREA] > self.min_area:
+                    filtered_mask[labels == i] = 255
+            mask = filtered_mask
 
             if self.output_mode == 0:
                 cleaned = np.ones_like(img) * 255
@@ -327,7 +398,7 @@ class HSVImageEditor(QMainWindow):
                 cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
             name, _ = os.path.splitext(filename)
-            save_path = os.path.join(self.output_folder, f"{name}_processed.png")
+            save_path = os.path.join(self.output_folder, f"{name}.png")
             cv2.imwrite(save_path, cleaned)
             print(f"✅ 已保存：{save_path}")
         print("🎉 批量保存完成！")
