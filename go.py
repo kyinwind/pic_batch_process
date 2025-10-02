@@ -66,47 +66,55 @@ from PyQt5.QtGui import QImage, QPixmap
 
 
 class HSVImageEditor(QMainWindow):
-    def create_hue_preview_image(self, height=50, width=1500):
+    def create_hue_preview_image(self, height=50, width=None):
         """生成HSV色调预览图：H从0到180渐变，S=255（最大饱和度），V=255（最大亮度）"""
-        # 1. 创建空白HSV图像（高度固定，宽度=180，对应H的0-180）
+        # 宽度不传则默认180
+        width = width or 180
+
+        # 1. 创建180像素宽HSV色条
         hsv_hue = np.zeros((height, 180, 3), dtype=np.uint8)
-        # 2. 填充H通道（每一列对应一个H值，S/V固定最大，保证颜色鲜艳）
         for h in range(180):
-            hsv_hue[:, h, 0] = np.uint8(h)  # H: 0-179（覆盖OpenCV完整H范围）
-            hsv_hue[:, h, 1] = np.uint8(255)  # S: 最大饱和度
-            hsv_hue[:, h, 2] = np.uint8(255)  # V: 最大亮度
-        # 3. 转换为BGR格式（适配OpenCV）并缩放至目标宽度（让预览条更宽）
+            hsv_hue[:, h, 0] = h
+            hsv_hue[:, h, 1] = 255
+            hsv_hue[:, h, 2] = 255
+
+        # 2. 转为BGR
         bgr_hue = cv2.cvtColor(hsv_hue, cv2.COLOR_HSV2BGR)
-        bgr_hue_scaled = cv2.resize(
-            bgr_hue, (width, height), interpolation=cv2.INTER_LINEAR
-        ).astype(np.uint8)
-        # 4. 添加H值刻度（每20个单位标一个刻度，如0、20、40...180，方便定位）
+
+        # 3. 根据目标宽度缩放
+        if width != 180:
+            bgr_hue = cv2.resize(
+                bgr_hue, (width, height), interpolation=cv2.INTER_LINEAR
+            )
+
+        # 4. 添加刻度
         step = 20
         for h in range(0, 181, step):
-            x = int((h / 180) * width)  # 计算刻度在缩放后图像中的X坐标
-            cv2.line(
-                bgr_hue_scaled, (x, height - 5), (x, height), (255, 255, 255), 1
-            )  # 白色刻度线
+            x = int((h / 180) * bgr_hue.shape[1])
+            cv2.line(bgr_hue, (x, height - 5), (x, height), (255, 255, 255), 1)
             cv2.putText(
-                bgr_hue_scaled,
+                bgr_hue,
                 str(h),
                 (x - 5, height - 7),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.3,
                 (255, 255, 255),
                 1,
-            )  # 刻度值
-        assert bgr_hue_scaled.dtype == np.uint8, "图像数据类型错误！"
-        return bgr_hue_scaled
+            )
+
+        return bgr_hue
 
     def __init__(self):
         super().__init__()
+
+        # 先初始化属性，避免resizeEvent报错
+        self.hue_preview_img = None
         self.img = None
         self.processed_img = None
         self.setWindowTitle("枣红色字体提取工具（PyQt5版）")
-        self.setGeometry(100, 100, 1200, 800)
+        # self.setGeometry(100, 100, 1200, 800)
         # 打开时自动最大化
-        self.showMaximized()
+        # self.showMaximized()
         # 文件夹设置
         self.input_folder = "input_images"
         self.output_folder = "output_images"
@@ -159,6 +167,24 @@ class HSVImageEditor(QMainWindow):
         self.timer.timeout.connect(self.update_preview)
         self.timer.start()
         self.update_preview()  # 添加此行确保初始加载时显示预览条
+        self.update_hue_preview()
+
+    def update_hue_preview(self):
+        if self.hue_preview_img is None:
+            return
+        rgb_img = cv2.cvtColor(self.hue_preview_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_img.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+        # 缩放到Label宽度自适应
+        pixmap = pixmap.scaled(
+            self.hue_preview_label.width(),
+            self.hue_preview_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.hue_preview_label.setPixmap(pixmap)
 
     def update_preview(self):
         if self.img is None:
@@ -186,26 +212,15 @@ class HSVImageEditor(QMainWindow):
         self.orig_label.setPixmap(orig_scaled)
         self.processed_label.setPixmap(processed_scaled)
         self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
-        # -------------------------- 新增代码：刷新H色调预览条 --------------------------
-        if self.hue_preview_img is not None and self.hue_preview_img.dtype == np.uint8:
-            hue_pix = self.cv2_to_qpixmap(self.hue_preview_img)
-            # 新增：再校验转换后的QPixmap是否有效（非空）
-            if not hue_pix.isNull():
-                hue_scaled = hue_pix.scaled(
-                    self.hue_preview_label.width(),
-                    50,  # 高度固定
-                    Qt.IgnoreAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                self.hue_preview_label.setPixmap(hue_scaled)
-        if self.hue_preview_img is None or self.hue_preview_img.size == 0:
-            print("警告：HSV预览图为空！")
-            return
-        # --------------------------------------------------------------------------------
 
     # 关键：当用户调整窗口大小时，强制刷新预览
     def resizeEvent(self, event):
+        # 根据 Label 宽度重新生成色条
+        if hasattr(self, "hue_preview_label") and self.hue_preview_label is not None:
+            label_width = max(self.hue_preview_label.width(), 100)  # 避免太小
+            self.hue_preview_img = self.create_hue_preview_image(width=label_width)
         self.update_preview()
+        self.update_hue_preview()
         super().resizeEvent(event)
 
     def load_image(self, index):
@@ -564,5 +579,5 @@ class HSVImageEditor(QMainWindow):
 if __name__ == "__main__":
     app = QApplication([])
     editor = HSVImageEditor()
-    editor.show()
+    editor.showMaximized()
     app.exec_()
