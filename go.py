@@ -1,6 +1,13 @@
 import cv2
 import numpy as np
 import os
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QSlider, QLabel, QPushButton, QGroupBox, QGridLayout, QSplitter
+)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPixmap
+
 
 # ----------------- 参数说明 -----------------
 # LowH1 / HighH1 : 第1段红色的色调范围（Hue）
@@ -28,227 +35,306 @@ import os
 #   - 调节目标：同上，控制明暗阈值
 #
 # -------------------------------------------
-
-# 输入输出文件夹
-input_folder = "input_images"
-output_folder = "output_images"
-os.makedirs(output_folder, exist_ok=True)
-
-# 筛选图片文件（增加对大小写扩展名的兼容）
-file_list = [
-    f
-    for f in os.listdir(input_folder)
-    if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff"))
-]
-if not file_list:
-    raise FileNotFoundError("⚠️ 没有在 input_images 文件夹中找到图片！")
-
-img_index = 0
+import cv2
+import numpy as np
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QSlider, QLabel, QPushButton, QGroupBox, QGridLayout, QSplitter
+)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPixmap
 
 
-def load_img(idx):
-    """加载图片，增加错误处理，避免空图像崩溃"""
-    img_path = os.path.join(input_folder, file_list[idx])
-    img = cv2.imread(img_path)
-    if img is None:
-        raise ValueError(f"❌ 无法读取图片：{img_path}（检查路径或文件完整性）")
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    return img, hsv
+class HSVImageEditor(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.img = None
+        self.processed_img = None
+        self.setWindowTitle("枣红色字体提取工具（PyQt5版）")
+        self.setGeometry(100, 100, 1200, 800)
+        # 打开时自动最大化
+        self.showMaximized()
+        # 文件夹设置
+        self.input_folder = "input_images"
+        self.output_folder = "output_images"
+        os.makedirs(self.output_folder, exist_ok=True)
 
+        self.file_list = [
+            f for f in os.listdir(self.input_folder)
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff"))
+        ]
+        if not self.file_list:
+            raise FileNotFoundError("⚠️ input_images 文件夹中未找到图片！")
 
-# 初始加载第一张图
-img, hsv = load_img(img_index)
+        self.img_index = 0
+        self.output_mode = 0
+        self.kernel = np.ones((3, 3), np.uint8)
 
-# 配置参数（优化默认值）
-compare_mode = "vertical"  # 'horizontal'（左右）或 'vertical'（上下）
-output_mode = 0  # 0=白底, 1=叠加, 2=掩码
-MAX_PREVIEW_SIZE = (1200, 800)  # 预览窗口最大尺寸（宽，高），适配大多数屏幕
+        # HSV 默认参数
+        self.hsv_params = {
+            "H1_low": 0, "H1_high": 10,
+            "S1_low": 80, "S1_high": 255,
+            "V1_low": 80, "V1_high": 255,
+            "H2_low": 170, "H2_high": 180,
+            "S2_low": 80, "S2_high": 255,
+            "V2_low": 80, "V2_high": 255,
+        }
 
+        self.img, self.hsv = self.load_image(self.img_index)
+        self.update_processed_image()
 
-def nothing(x):
-    pass
+        self.init_ui()
 
+        # 定时刷新
+        self.timer = QTimer()
+        self.timer.setInterval(50)
+        self.timer.timeout.connect(self.update_preview)
+        self.timer.start()
+    def update_preview(self):
+        if self.img is None:
+            return  # 没有图像时不更新
+        orig_pix = self.cv2_to_qpixmap(self.img)
+        processed_pix = self.cv2_to_qpixmap(self.processed_img)
 
-# 1. 创建可缩放窗口（不提前固定大小，避免拉伸）
-cv2.namedWindow("Adjust HSV", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-# WINDOW_KEEPRATIO：保证窗口缩放时，图像保持原始宽高比
+        # ---- 根据窗口大小自适应缩放 ----
+        available_width = self.orig_label.width()
+        available_height = self.orig_label.height()
 
-
-# 2. 创建Trackbar（保持原逻辑）
-cv2.createTrackbar("LowH1", "Adjust HSV", 0, 180, nothing)
-cv2.createTrackbar("HighH1", "Adjust HSV", 10, 180, nothing)
-cv2.createTrackbar("LowS1", "Adjust HSV", 80, 255, nothing)
-cv2.createTrackbar("HighS1", "Adjust HSV", 255, 255, nothing)
-cv2.createTrackbar("LowV1", "Adjust HSV", 80, 255, nothing)
-cv2.createTrackbar("HighV1", "Adjust HSV", 255, 255, nothing)
-
-cv2.createTrackbar("LowH2", "Adjust HSV", 170, 180, nothing)
-cv2.createTrackbar("HighH2", "Adjust HSV", 180, 180, nothing)
-cv2.createTrackbar("LowS2", "Adjust HSV", 80, 255, nothing)
-cv2.createTrackbar("HighS2", "Adjust HSV", 255, 255, nothing)
-cv2.createTrackbar("LowV2", "Adjust HSV", 80, 255, nothing)
-cv2.createTrackbar("HighV2", "Adjust HSV", 255, 255, nothing)
-
-
-def calculate_optimal_scale(original_size, max_size):
-    """
-    计算最优缩放比例：保证图像缩放后不超过最大尺寸，且保持宽高比
-    original_size: (原宽, 原高)
-    max_size: (最大宽, 最大高)
-    """
-    orig_w, orig_h = original_size
-    max_w, max_h = max_size
-
-    # 计算宽度和高度的缩放比例（取较小值，避免超出最大尺寸）
-    scale_w = max_w / orig_w if orig_w != 0 else 1.0
-    scale_h = max_h / orig_h if orig_h != 0 else 1.0
-    scale = min(scale_w, scale_h, 1.0)  # 不放大（scale≤1），避免放大导致模糊
-    return scale
-
-
-while True:
-    # 3. 获取Trackbar值（保持原逻辑）
-    lowH1 = cv2.getTrackbarPos("LowH1", "Adjust HSV")
-    highH1 = cv2.getTrackbarPos("HighH1", "Adjust HSV")
-    lowS1 = cv2.getTrackbarPos("LowS1", "Adjust HSV")
-    highS1 = cv2.getTrackbarPos("HighS1", "Adjust HSV")
-    lowV1 = cv2.getTrackbarPos("LowV1", "Adjust HSV")
-    highV1 = cv2.getTrackbarPos("HighV1", "Adjust HSV")
-
-    lowH2 = cv2.getTrackbarPos("LowH2", "Adjust HSV")
-    highH2 = cv2.getTrackbarPos("HighH2", "Adjust HSV")
-    lowS2 = cv2.getTrackbarPos("LowS2", "Adjust HSV")
-    highS2 = cv2.getTrackbarPos("HighS2", "Adjust HSV")
-    lowV2 = cv2.getTrackbarPos("LowV2", "Adjust HSV")
-    highV2 = cv2.getTrackbarPos("HighV2", "Adjust HSV")
-
-    # 4. 红色掩码计算（保持原逻辑）
-    lower_red1 = np.array([lowH1, lowS1, lowV1])
-    upper_red1 = np.array([highH1, highS1, highV1])
-    lower_red2 = np.array([lowH2, lowS2, lowV2])
-    upper_red2 = np.array([highH2, highS2, highV2])
-
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask = cv2.bitwise_or(mask1, mask2)
-
-    # 小膨胀/闭运算，修复缺口（保持原逻辑）
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=1)
-
-    # 5. 三种输出模式（保持原逻辑）
-    if output_mode == 0:
-        # 模式1: 白底红字
-        cleaned = np.ones_like(img) * 255
-        cleaned[mask > 0] = img[mask > 0]
-    elif output_mode == 1:
-        # 模式2: 原图叠加（只保留红字，背景淡化）
-        background = np.ones_like(img) * 255
-        red_only = cv2.bitwise_and(img, img, mask=mask)
-        cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
-    else:
-        # 模式3: 纯掩码（转为BGR以便和原图拼接）
-        cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
-    # 6. 拼接原图和处理图（优化缩放逻辑）
-    if compare_mode == "horizontal":
-        # 左右拼接：宽度相加，高度取两者最大（避免截断）
-        combined_h = max(img.shape[0], cleaned.shape[0])
-        # 统一高度（用INTER_AREA保持细节）
-        img_resized = cv2.resize(
-            img, (img.shape[1], combined_h), interpolation=cv2.INTER_AREA
+        orig_scaled = orig_pix.scaled(
+            available_width, available_height, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-        cleaned_resized = cv2.resize(
-            cleaned, (cleaned.shape[1], combined_h), interpolation=cv2.INTER_AREA
+        processed_scaled = processed_pix.scaled(
+            available_width, available_height, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
-        preview = np.hstack((img_resized, cleaned_resized))
-    else:
-        # 上下拼接：高度相加，宽度取两者最大
-        combined_w = max(img.shape[1], cleaned.shape[1])
-        # 统一宽度（用INTER_AREA保持细节）
-        img_resized = cv2.resize(
-            img, (combined_w, img.shape[0]), interpolation=cv2.INTER_AREA
+
+        self.orig_label.setPixmap(orig_scaled)
+        self.processed_label.setPixmap(processed_scaled)
+        self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
+
+    # 关键：当用户调整窗口大小时，强制刷新预览
+    def resizeEvent(self, event):
+        self.update_preview()
+        super().resizeEvent(event)
+
+    def load_image(self, index):
+        img_path = os.path.join(self.input_folder, self.file_list[index])
+        img = cv2.imread(img_path)
+        if img is None:
+            raise ValueError(f"❌ 无法读取图片：{img_path}")
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        return img, hsv
+
+    def process_image(self):
+        lower1 = np.array([self.hsv_params["H1_low"], self.hsv_params["S1_low"], self.hsv_params["V1_low"]])
+        upper1 = np.array([self.hsv_params["H1_high"], self.hsv_params["S1_high"], self.hsv_params["V1_high"]])
+        lower2 = np.array([self.hsv_params["H2_low"], self.hsv_params["S2_low"], self.hsv_params["V2_low"]])
+        upper2 = np.array([self.hsv_params["H2_high"], self.hsv_params["S2_high"], self.hsv_params["V2_high"]])
+
+        mask1 = cv2.inRange(self.hsv, lower1, upper1)
+        mask2 = cv2.inRange(self.hsv, lower2, upper2)
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+        mask = cv2.dilate(mask, self.kernel, iterations=1)
+
+        if self.output_mode == 0:
+            cleaned = np.ones_like(self.img) * 255
+            cleaned[mask > 0] = self.img[mask > 0]
+        elif self.output_mode == 1:
+            background = np.ones_like(self.img) * 255
+            red_only = cv2.bitwise_and(self.img, self.img, mask=mask)
+            cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
+        else:
+            cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        return cleaned
+
+    def update_processed_image(self):
+        self.processed_img = self.process_image()
+
+    def cv2_to_qpixmap(self, cv_img):
+        if cv_img is None or cv_img.size == 0:
+            return QPixmap()  # 返回一个空 pixmap，避免崩溃
+        rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_img.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        return QPixmap.fromImage(qimg)
+
+    def update_preview(self):
+        if self.img is None:
+            return
+
+        orig_pix = self.cv2_to_qpixmap(self.img)
+        processed_pix = self.cv2_to_qpixmap(self.processed_img)
+
+        # 获取两个 QLabel 的当前显示区域大小
+        orig_size = self.orig_label.size()
+        proc_size = self.processed_label.size()
+
+        # 按 label 尺寸缩放，而不是按图片原始高度
+        orig_scaled = orig_pix.scaled(
+            orig_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
         )
-        cleaned_resized = cv2.resize(
-            cleaned, (combined_w, cleaned.shape[0]), interpolation=cv2.INTER_AREA
+        processed_scaled = processed_pix.scaled(
+            proc_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
         )
-        preview = np.vstack((img_resized, cleaned_resized))
 
-    # 7. 计算最优缩放比例，避免模糊
-    preview_orig_size = (preview.shape[1], preview.shape[0])  # (宽, 高)
-    scale = calculate_optimal_scale(preview_orig_size, MAX_PREVIEW_SIZE)
-    # 缩放预览图（关键：用INTER_AREA插值，缩小图像时细节保留最好）
-    preview_scaled = cv2.resize(
-        preview,
-        (int(preview_orig_size[0] * scale), int(preview_orig_size[1] * scale)),
-        interpolation=cv2.INTER_AREA,  # 替换为INTER_AREA，解决缩小模糊
-    )
+        self.orig_label.setPixmap(orig_scaled)
+        self.processed_label.setPixmap(processed_scaled)
+        self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
 
-    # 8. 显示缩放后的图像
-    cv2.imshow("Adjust HSV", preview_scaled)
-    # 自动调整窗口大小以匹配缩放后的图像（避免黑边或拉伸）
-    cv2.resizeWindow("Adjust HSV", preview_scaled.shape[1], preview_scaled.shape[0])
 
-    # 9. 键盘控制（保持原逻辑）
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord("s"):
-        # 批量处理并保存（优化保存逻辑：保留原扩展名，避免强制转PNG）
-        for filename in file_list:
-            filepath = os.path.join(input_folder, filename)
-            img_save = cv2.imread(filepath)
-            if img_save is None:
-                print(f"⚠️ 跳过无法读取的图片：{filepath}")
+    def on_slider_change(self, slider_name, value):
+        self.hsv_params[slider_name] = value
+        self.param_labels[slider_name].setText(f"{value}")
+        self.update_processed_image()
+
+    def create_hsv_group(self, title, param_prefix):
+        group = QGroupBox(title)
+        layout = QGridLayout()
+
+        if "H" in param_prefix:
+            params = [(f"{param_prefix}low", (0, 180), f"{param_prefix.upper()}低："),
+                      (f"{param_prefix}high", (0, 180), f"{param_prefix.upper()}高：")]
+        else:
+            params = [(f"{param_prefix}low", (0, 255), f"{param_prefix.upper()}低："),
+                      (f"{param_prefix}high", (0, 255), f"{param_prefix.upper()}高：")]
+
+        for row, (param_key, slider_range, label_text) in enumerate(params):
+            label = QLabel(label_text)
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(*slider_range)
+            slider.setValue(self.hsv_params[param_key])
+            slider.valueChanged.connect(lambda v, k=param_key: self.on_slider_change(k, v))
+            value_label = QLabel(str(self.hsv_params[param_key]))
+            value_label.setAlignment(Qt.AlignRight)
+            value_label.setFixedWidth(50)
+            self.param_labels[param_key] = value_label
+
+            layout.addWidget(label, row, 0)
+            layout.addWidget(slider, row, 1)
+            layout.addWidget(value_label, row, 2)
+
+        group.setLayout(layout)
+        return group
+
+    def init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        self.img_name_label = QLabel(f"当前图片：{self.file_list[self.img_index]}")
+        self.img_name_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(self.img_name_label)
+
+        preview_layout = QHBoxLayout()
+        self.orig_label = QLabel("原图")
+        self.orig_label.setAlignment(Qt.AlignCenter)
+        self.processed_label = QLabel("处理结果")
+        self.processed_label.setAlignment(Qt.AlignCenter)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.orig_label)
+        splitter.addWidget(self.processed_label)
+        splitter.setSizes([600, 600])
+        preview_layout.addWidget(splitter)
+        main_layout.addLayout(preview_layout, stretch=1)
+
+        self.param_labels = {}
+        params_layout = QHBoxLayout()
+
+        group1 = QVBoxLayout()
+        group1.addWidget(self.create_hsv_group("红色区间1 - H", "H1_"))
+        group1.addWidget(self.create_hsv_group("红色区间1 - S", "S1_"))
+        group1.addWidget(self.create_hsv_group("红色区间1 - V", "V1_"))
+
+        group2 = QVBoxLayout()
+        group2.addWidget(self.create_hsv_group("红色区间2 - H", "H2_"))
+        group2.addWidget(self.create_hsv_group("红色区间2 - S", "S2_"))
+        group2.addWidget(self.create_hsv_group("红色区间2 - V", "V2_"))
+
+        params_layout.addLayout(group1)
+        params_layout.addLayout(group2)
+        main_layout.addLayout(params_layout)
+
+        btn_layout = QHBoxLayout()
+        self.prev_btn = QPushButton("上一张（←）")
+        self.prev_btn.clicked.connect(lambda: self.switch_image(-1))
+        self.next_btn = QPushButton("下一张（→）")
+        self.next_btn.clicked.connect(lambda: self.switch_image(1))
+        self.mode_btn = QPushButton("切换模式（当前：白底红字）")
+        self.mode_btn.clicked.connect(self.switch_mode)
+        self.save_btn = QPushButton("批量保存所有图片")
+        self.save_btn.clicked.connect(self.batch_save)
+        self.quit_btn = QPushButton("退出")
+        self.quit_btn.clicked.connect(QApplication.quit)
+
+        btn_layout.addWidget(self.prev_btn)
+        btn_layout.addWidget(self.next_btn)
+        btn_layout.addWidget(self.mode_btn)
+        btn_layout.addWidget(self.save_btn)
+        btn_layout.addWidget(self.quit_btn)
+        main_layout.addLayout(btn_layout)
+
+    def switch_image(self, step):
+        self.img_index = (self.img_index + step) % len(self.file_list)
+        self.img, self.hsv = self.load_image(self.img_index)
+        self.update_processed_image()
+        print(f"🔄 切换到：{self.file_list[self.img_index]}")
+
+    def switch_mode(self):
+        self.output_mode = (self.output_mode + 1) % 3
+        mode_names = ["白底红字", "叠加模式", "掩码模式"]
+        self.mode_btn.setText(f"切换模式（当前：{mode_names[self.output_mode]}）")
+        self.processed_label.setText(f"处理结果（{mode_names[self.output_mode]}）")
+        self.update_processed_image()
+
+    def batch_save(self):
+        print("📤 开始批量保存...")
+        for idx, filename in enumerate(self.file_list):
+            img_path = os.path.join(self.input_folder, filename)
+            img = cv2.imread(img_path)
+            if img is None:
+                print(f"⚠️ 跳过无法读取的图片：{filename}")
                 continue
-            hsv_save = cv2.cvtColor(img_save, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-            # 重新计算掩码（避免复用之前的mask，确保每张图独立处理）
-            mask1_save = cv2.inRange(hsv_save, lower_red1, upper_red1)
-            mask2_save = cv2.inRange(hsv_save, lower_red2, upper_red2)
-            mask_save = cv2.bitwise_or(mask1_save, mask2_save)
-            mask_save = cv2.morphologyEx(mask_save, cv2.MORPH_CLOSE, kernel)
-            mask_save = cv2.dilate(mask_save, kernel, iterations=1)
+            lower1 = np.array([self.hsv_params["H1_low"], self.hsv_params["S1_low"], self.hsv_params["V1_low"]])
+            upper1 = np.array([self.hsv_params["H1_high"], self.hsv_params["S1_high"], self.hsv_params["V1_high"]])
+            lower2 = np.array([self.hsv_params["H2_low"], self.hsv_params["S2_low"], self.hsv_params["V2_low"]])
+            upper2 = np.array([self.hsv_params["H2_high"], self.hsv_params["S2_high"], self.hsv_params["V2_high"]])
 
-            # 生成处理后的图像
-            if output_mode == 0:
-                cleaned_save = np.ones_like(img_save) * 255
-                cleaned_save[mask_save > 0] = img_save[mask_save > 0]
-            elif output_mode == 1:
-                background_save = np.ones_like(img_save) * 255
-                red_only_save = cv2.bitwise_and(img_save, img_save, mask=mask_save)
-                cleaned_save = cv2.addWeighted(
-                    red_only_save, 1.0, background_save, 0.0, 0
-                )
+            mask1 = cv2.inRange(hsv, lower1, upper1)
+            mask2 = cv2.inRange(hsv, lower2, upper2)
+            mask = cv2.bitwise_or(mask1, mask2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+            mask = cv2.dilate(mask, self.kernel, iterations=1)
+
+            if self.output_mode == 0:
+                cleaned = np.ones_like(img) * 255
+                cleaned[mask > 0] = img[mask > 0]
+            elif self.output_mode == 1:
+                background = np.ones_like(img) * 255
+                red_only = cv2.bitwise_and(img, img, mask=mask)
+                cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
             else:
-                cleaned_save = cv2.cvtColor(mask_save, cv2.COLOR_GRAY2BGR)
+                cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-            # 无论原文件是JPG/BMP，均保存为“原文件名.png”
-            name, _ = os.path.splitext(filename)  # 忽略原扩展名
-            savepath = os.path.join(output_folder, f"{name}.png")
-            # PNG为无损格式，无需额外设置质量参数，直接保存
-            cv2.imwrite(savepath, cleaned_save)
-            print(f"✅ 已保存为PNG: {savepath}")
+            name, _ = os.path.splitext(filename)
+            save_path = os.path.join(self.output_folder, f"{name}_processed.png")
+            cv2.imwrite(save_path, cleaned)
+            print(f"✅ 已保存：{save_path}")
+        print("🎉 批量保存完成！")
 
-        print("🎉 所有图片处理完成！")
-        break
-    elif key == ord("q"):
-        print("❌ 用户退出。")
-        break
-    elif key == ord("c"):
-        compare_mode = "vertical" if compare_mode == "horizontal" else "horizontal"
-        print(f"🔄 已切换为 {'上下比较' if compare_mode == 'vertical' else '左右比较'}")
-    elif key == ord("m"):
-        output_mode = (output_mode + 1) % 3
-        print(
-            f"🎨 已切换输出模式: {output_mode} ({['白底','叠加','掩码'][output_mode]})"
-        )
-    elif key == ord("p"):
-        img_index = (img_index - 1) % len(file_list)
-        img, hsv = load_img(img_index)
-        print(f"⬆️ 切换到上一张：{file_list[img_index]}")
-    elif key == ord("n"):
-        img_index = (img_index + 1) % len(file_list)
-        img, hsv = load_img(img_index)
-        print(f"⬇️ 切换到下一张：{file_list[img_index]}")
 
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    app = QApplication([])
+    editor = HSVImageEditor()
+    editor.show()
+    app.exec_()
