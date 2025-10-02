@@ -186,22 +186,6 @@ class HSVImageEditor(QMainWindow):
         self.orig_label.setPixmap(orig_scaled)
         self.processed_label.setPixmap(processed_scaled)
         self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
-        # -------------------------- 新增代码：刷新H色调预览条 --------------------------
-        if self.hue_preview_img is not None and self.hue_preview_img.dtype == np.uint8:
-            hue_pix = self.cv2_to_qpixmap(self.hue_preview_img)
-            # 新增：再校验转换后的QPixmap是否有效（非空）
-            if not hue_pix.isNull():
-                hue_scaled = hue_pix.scaled(
-                    self.hue_preview_label.width(),
-                    50,  # 高度固定
-                    Qt.IgnoreAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                self.hue_preview_label.setPixmap(hue_scaled)
-        if self.hue_preview_img is None or self.hue_preview_img.size == 0:
-            print("警告：HSV预览图为空！")
-            return
-        # --------------------------------------------------------------------------------
 
     # 关键：当用户调整窗口大小时，强制刷新预览
     def resizeEvent(self, event):
