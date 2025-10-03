@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QSplitter,
     QSizePolicy,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
@@ -60,12 +61,82 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QGridLayout,
     QSplitter,
+    QComboBox,  # ✅ 新增
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QFont
 
 
 class HSVImageEditor(QMainWindow):
+    # 添加双击事件处理方法
+    def on_orig_image_dblclick(self, event):
+        """双击原图时，用系统默认程序打开原图文件"""
+        if not self.file_list:
+            self.show_toast("没有图片可打开")
+            return
+
+        # 获取原图路径
+        orig_path = os.path.join(self.input_folder, self.file_list[self.img_index])
+        if os.path.exists(orig_path):
+            try:
+                # 用系统默认程序打开文件
+                os.startfile(orig_path)
+            except Exception as e:
+                self.show_toast(f"打开失败：{str(e)}")
+        else:
+            self.show_toast(f"原图不存在：{orig_path}")
+
+    def on_processed_image_dblclick(self, event):
+        """双击处理结果时，用系统默认程序打开处理后的图片"""
+        if not self.file_list or self.processed_img is None:
+            self.show_toast("没有处理结果可打开")
+            return
+
+        # 生成处理后图片的保存路径（与保存当前图片的路径一致）
+        filename = self.file_list[self.img_index]
+        name, _ = os.path.splitext(filename)
+        processed_path = os.path.join(self.output_folder, f"{name}.png")
+
+        # 检查文件是否存在
+        if os.path.exists(processed_path):
+            try:
+                os.startfile(processed_path)
+            except Exception as e:
+                self.show_toast(f"打开失败：{str(e)}")
+        else:
+            self.show_toast("处理结果未保存，请先保存图片")
+
+    def show_toast(self, message):
+        """显示一个短暂的提示窗口"""
+        # 创建提示标签
+        toast = QLabel(message, self)
+        # 设置样式：黑色半透明背景、白色文字、居中
+        toast.setStyleSheet(
+            """
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 4px;
+            padding: 8px 16px;
+        """
+        )
+        # 设置字体
+        font = QFont()
+        font.setPointSize(10)
+        toast.setFont(font)
+        # 设置对齐方式
+        toast.setAlignment(Qt.AlignCenter)
+        # 调整大小
+        toast.adjustSize()
+        # 放置在窗口底部中间
+        toast.move(
+            (self.width() - toast.width()) // 2,
+            30,  # 底部留出30px间距
+        )
+        # 显示提示
+        toast.show()
+        # 3秒后自动关闭
+        QTimer.singleShot(3000, toast.deleteLater)
+
     def create_hue_preview_image(self, height=50, width=None):
         """生成HSV色调预览图：H从0到180渐变，S=255（最大饱和度），V=255（最大亮度）"""
         # 宽度不传则默认180
@@ -104,6 +175,30 @@ class HSVImageEditor(QMainWindow):
 
         return bgr_hue
 
+    def save_current(self):
+        print("💾 保存当前图片...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        # 取当前处理后的图像
+        cleaned = self.processed_img.copy()
+
+        # 生成保存路径
+        filename = self.file_list[self.img_index]
+        name, _ = os.path.splitext(filename)
+        save_path = os.path.join(self.output_folder, f"{name}.png")
+
+        # 保存文件
+        success = cv2.imwrite(save_path, cleaned)
+        if success:
+            print(f"✅ 已保存当前图片：{save_path}")
+            # 显示保存成功的toast提示
+            self.show_toast(f"保存成功：{os.path.basename(save_path)}")
+        else:
+            print(f"❌ 保存失败：{save_path}")
+            self.show_toast(f"保存失败：{os.path.basename(save_path)}")
+
+        QApplication.restoreOverrideCursor()
+
     def __init__(self):
         super().__init__()
 
@@ -112,9 +207,7 @@ class HSVImageEditor(QMainWindow):
         self.img = None
         self.processed_img = None
         self.setWindowTitle("枣红色字体提取工具（PyQt5版）")
-        # self.setGeometry(100, 100, 1200, 800)
-        # 打开时自动最大化
-        # self.showMaximized()
+
         # 文件夹设置
         self.input_folder = "input_images"
         self.output_folder = "output_images"
@@ -135,6 +228,8 @@ class HSVImageEditor(QMainWindow):
         self.morph_kernel = np.ones((3, 3), np.uint8)
         # 最小连通区域面积，用于过滤小灰尘
         self.min_area = 50
+        self.enable_dust_removal = False  # ✅ 开关状态
+
         # HSV 默认参数
         self.hsv_params = {
             "H1_low": 0,
@@ -150,17 +245,18 @@ class HSVImageEditor(QMainWindow):
             "V2_low": 80,
             "V2_high": 255,
         }
-
+        # 1. 先加载图像
         self.img, self.hsv = self.load_image(self.img_index)
-        self.update_processed_image()
-        # -------------------------- 新增代码 --------------------------
+
+        # 2. 先初始化UI
+        self.init_ui()
+        # 3. 生成色调预览图
         self.hue_preview_img = self.create_hue_preview_image().astype(
             np.uint8
         )  # 生成H色调光谱图
         assert self.hue_preview_img.dtype == np.uint8, "图像数据类型错误！应为np.uint8"
-        # --------------------------------------------------------------
-        self.init_ui()
-
+        # 4. 最后处理图像
+        self.update_processed_image()
         # 定时刷新
         self.timer = QTimer()
         self.timer.setInterval(50)
@@ -234,6 +330,7 @@ class HSVImageEditor(QMainWindow):
     def process_image(self):
         # 显示繁忙鼠标图标
         QApplication.setOverrideCursor(Qt.WaitCursor)
+
         lower1 = np.array(
             [
                 self.hsv_params["H1_low"],
@@ -263,24 +360,12 @@ class HSVImageEditor(QMainWindow):
             ]
         )
 
+        # 颜色区间掩码
         mask1 = cv2.inRange(self.hsv, lower1, upper1)
         mask2 = cv2.inRange(self.hsv, lower2, upper2)
         mask = cv2.bitwise_or(mask1, mask2)
 
-        # 形态学开运算，先腐蚀后膨胀，去除小灰尘
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1)
-        # 闭运算，填充文字内部的小缺口
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1)
-        # 连通区域过滤，去除小面积区域（灰尘）
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            mask, connectivity=8
-        )
-        filtered_mask = np.zeros_like(mask)
-
-        for i in range(1, num_labels):
-            if stats[i, cv2.CC_STAT_AREA] > self.min_area:
-                filtered_mask[labels == i] = 255
-        mask = filtered_mask
+        # 默认的初始结果（没去灰尘时用）
         if self.output_mode == 0:
             cleaned = np.ones_like(self.img) * 255
             cleaned[mask > 0] = self.img[mask > 0]
@@ -290,6 +375,39 @@ class HSVImageEditor(QMainWindow):
             cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
         else:
             cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        # ✅ 判断是否启用去灰尘
+        if self.dust_checkbox.isChecked():
+            # 形态学开运算，去小灰尘
+            mask = cv2.morphologyEx(
+                mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1
+            )
+            # 闭运算，填充小缺口
+            mask = cv2.morphologyEx(
+                mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1
+            )
+
+            # 连通区域过滤，去除小面积区域
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                mask, connectivity=8
+            )
+            filtered_mask = np.zeros_like(mask)
+            for i in range(1, num_labels):  # 跳过背景
+                if stats[i, cv2.CC_STAT_AREA] > self.min_area:
+                    filtered_mask[labels == i] = 255
+            mask = filtered_mask
+
+        # 根据输出模式生成结果
+        if self.output_mode == 0:
+            cleaned = np.ones_like(self.img) * 255
+            cleaned[mask > 0] = self.img[mask > 0]
+        elif self.output_mode == 1:
+            background = np.ones_like(self.img) * 255
+            red_only = cv2.bitwise_and(self.img, self.img, mask=mask)
+            cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
+        else:
+            cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
         # 恢复默认鼠标图标
         QApplication.restoreOverrideCursor()
         return cleaned
@@ -358,11 +476,31 @@ class HSVImageEditor(QMainWindow):
         group.setLayout(layout)
         return group
 
+    # ----------------- 新增方法 -----------------
+    def on_image_selected(self, index):
+        """当下拉框选择图片时切换"""
+        self.img_index = index
+        self.img, self.hsv = self.load_image(self.img_index)
+        self.update_processed_image()
+        self.update_preview()
+        print(f"📂 已选择：{self.file_list[self.img_index]}")
+
+    # --------------------------------------------
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        # ---------------- 图片选择下拉框 ----------------
+        select_layout = QHBoxLayout()
+        self.img_combo = QComboBox()
+        self.img_combo.addItems(self.file_list)  # 加载所有图片名称
+        self.img_combo.setCurrentIndex(self.img_index)
+        self.img_combo.currentIndexChanged.connect(self.on_image_selected)
+        select_layout.addWidget(QLabel("选择图片："))
+        select_layout.addWidget(self.img_combo, stretch=1)
 
+        main_layout.addLayout(select_layout)
+        # -------------------------------------------------
         self.img_name_label = QLabel(f"当前图片：{self.file_list[self.img_index]}")
         self.img_name_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.img_name_label)
@@ -384,8 +522,14 @@ class HSVImageEditor(QMainWindow):
         preview_layout = QVBoxLayout()
         self.orig_label = QLabel("原图")
         self.orig_label.setAlignment(Qt.AlignCenter)
+        self.orig_label.mouseDoubleClickEvent = (
+            self.on_orig_image_dblclick
+        )  # 绑定双击事件
         self.processed_label = QLabel("处理结果")
         self.processed_label.setAlignment(Qt.AlignCenter)
+        self.processed_label.mouseDoubleClickEvent = (
+            self.on_processed_image_dblclick
+        )  # 绑定双击事件
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.orig_label)
@@ -413,6 +557,11 @@ class HSVImageEditor(QMainWindow):
         dust_inner_layout = QGridLayout()
 
         # 形态学核大小滑块
+        # ✅ 新增：开关复选框
+        self.dust_checkbox = QCheckBox("启用去灰尘")
+        self.dust_checkbox.setChecked(False)
+        self.dust_checkbox.stateChanged.connect(self.update_processed_image)
+
         kernel_size_label = QLabel("形态学核大小：")
         self.kernel_size_slider = QSlider(Qt.Horizontal)
         self.kernel_size_slider.setRange(1, 10)
@@ -434,12 +583,15 @@ class HSVImageEditor(QMainWindow):
         min_area_value_label.setFixedWidth(50)
         self.min_area_value_label = min_area_value_label
 
-        dust_inner_layout.addWidget(kernel_size_label, 0, 0)
-        dust_inner_layout.addWidget(self.kernel_size_slider, 0, 1)
-        dust_inner_layout.addWidget(kernel_size_value_label, 0, 2)
-        dust_inner_layout.addWidget(min_area_label, 1, 0)
-        dust_inner_layout.addWidget(self.min_area_slider, 1, 1)
-        dust_inner_layout.addWidget(min_area_value_label, 1, 2)
+        dust_inner_layout.addWidget(self.dust_checkbox, 0, 0, 1, 3)  # 跨三列更自然
+        # ✅ 滑块从第二行开始
+        dust_inner_layout.addWidget(kernel_size_label, 1, 0)
+        dust_inner_layout.addWidget(self.kernel_size_slider, 1, 1)
+        dust_inner_layout.addWidget(kernel_size_value_label, 1, 2)
+
+        dust_inner_layout.addWidget(min_area_label, 2, 0)
+        dust_inner_layout.addWidget(self.min_area_slider, 2, 1)
+        dust_inner_layout.addWidget(min_area_value_label, 2, 2)
 
         dust_group.setLayout(dust_inner_layout)
         dust_layout.addWidget(dust_group)
@@ -449,21 +601,31 @@ class HSVImageEditor(QMainWindow):
         params_layout.addLayout(dust_layout)  # 将dust_layout添加到params_layout
         main_layout.addLayout(params_layout)  # 将params_layout添加到main_layout
 
+        # 在init_ui方法的按钮布局部分修改
         btn_layout = QHBoxLayout()
-        self.prev_btn = QPushButton("上一张（←）")
+        # 上一张（快捷键P）
+        self.prev_btn = QPushButton("上一张（←）(&P)")
         self.prev_btn.clicked.connect(lambda: self.switch_image(-1))
-        self.next_btn = QPushButton("下一张（→）")
+        # 下一张（快捷键N）
+        self.next_btn = QPushButton("下一张（→）(&N)")
         self.next_btn.clicked.connect(lambda: self.switch_image(1))
+        # 切换模式按钮保持不变
         self.mode_btn = QPushButton("切换模式（当前：白底红字）")
         self.mode_btn.clicked.connect(self.switch_mode)
-        self.save_btn = QPushButton("批量保存所有图片")
+        # 保存当前图片（快捷键S）
+        self.save_current_btn = QPushButton("保存当前图片(&S)")
+        self.save_current_btn.clicked.connect(self.save_current)
+        # 批量保存所有图片（快捷键B）
+        self.save_btn = QPushButton("批量保存所有图片(&B)")
         self.save_btn.clicked.connect(self.batch_save)
-        self.quit_btn = QPushButton("退出")
+        # 退出（快捷键Q）
+        self.quit_btn = QPushButton("退出(&Q)")
         self.quit_btn.clicked.connect(QApplication.quit)
 
         btn_layout.addWidget(self.prev_btn)
         btn_layout.addWidget(self.next_btn)
         btn_layout.addWidget(self.mode_btn)
+        btn_layout.addWidget(self.save_current_btn)
         btn_layout.addWidget(self.save_btn)
         btn_layout.addWidget(self.quit_btn)
         main_layout.addLayout(btn_layout)
@@ -486,6 +648,7 @@ class HSVImageEditor(QMainWindow):
         self.img_index = (self.img_index + step) % len(self.file_list)
         self.img, self.hsv = self.load_image(self.img_index)
         self.update_processed_image()
+        self.img_combo.setCurrentIndex(self.img_index)  # ✅ 让下拉框也更新
         print(f"🔄 切换到：{self.file_list[self.img_index]}")
 
     def switch_mode(self):
@@ -539,23 +702,22 @@ class HSVImageEditor(QMainWindow):
             mask1 = cv2.inRange(hsv, lower1, upper1)
             mask2 = cv2.inRange(hsv, lower2, upper2)
             mask = cv2.bitwise_or(mask1, mask2)
-
-            # 应用形态学操作和连通区域过滤（与实时处理一致）
-            mask = cv2.morphologyEx(
-                mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1
-            )
-            mask = cv2.morphologyEx(
-                mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1
-            )
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-                mask, connectivity=8
-            )
-            filtered_mask = np.zeros_like(mask)
-
-            for i in range(1, num_labels):
-                if stats[i, cv2.CC_STAT_AREA] > self.min_area:
-                    filtered_mask[labels == i] = 255
-            mask = filtered_mask
+            if self.dust_checkbox.isChecked():
+                # 应用形态学操作和连通区域过滤（与实时处理一致）
+                mask = cv2.morphologyEx(
+                    mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1
+                )
+                mask = cv2.morphologyEx(
+                    mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1
+                )
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                    mask, connectivity=8
+                )
+                filtered_mask = np.zeros_like(mask)
+                for i in range(1, num_labels):
+                    if stats[i, cv2.CC_STAT_AREA] > self.min_area:
+                        filtered_mask[labels == i] = 255
+                mask = filtered_mask
 
             if self.output_mode == 0:
                 cleaned = np.ones_like(img) * 255
@@ -572,6 +734,7 @@ class HSVImageEditor(QMainWindow):
             cv2.imwrite(save_path, cleaned)
             print(f"✅ 已保存：{save_path}")
         print("🎉 批量保存完成！")
+        self.show_toast(f"批量处理成功!")
         # 恢复默认鼠标图标
         QApplication.restoreOverrideCursor()
 
