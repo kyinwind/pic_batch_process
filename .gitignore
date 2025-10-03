@@ -43,8 +43,7 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
-.imput_images/
-.output_iamges/
-*.jpg
-*.png
+/input_images/
+/output_images/
+
 
