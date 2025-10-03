@@ -9,8 +9,5 @@ pip install opencv-python numpy pyqt5
 3、运行
 python go.py
 
-s，保存所有图片。
-q，直接退出
-n，查看下一张图片
-p，查看上一张图片
-c，切换水平对比和垂直对比查看图片
+
+![主界面](ui.png)
