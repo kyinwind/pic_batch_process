@@ -428,6 +428,9 @@ class HSVImageEditor(QMainWindow):
                     filtered_mask[labels == i] = 255
             mask = filtered_mask
 
+        # --- 高斯模糊平滑边缘 ---
+        mask = cv2.GaussianBlur(mask, (3, 3), 0)
+
         # 根据输出模式生成结果
         if self.output_mode == 0:
             cleaned = np.ones_like(self.img) * 255
