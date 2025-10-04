@@ -165,7 +165,7 @@ class HSVImageEditor(QMainWindow):
                 filename = self.file_list[self.img_index]
                 name, _ = os.path.splitext(filename)
                 processed_path = os.path.join(self.output_folder, f"{name}.png")
-                print(f"processed_path: {processed_path}")
+
                 # 检查文件是否存在
                 if os.path.exists(processed_path):
                     try:
@@ -510,13 +510,13 @@ class HSVImageEditor(QMainWindow):
 
         # --- 锐化处理 ---
 
-        # if self.sharpen_checkbox.isChecked():
-        #     # 方法1：卷积核锐化
-        #     # kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        #     # mask = cv2.filter2D(mask, -1, kernel)
-        #     # 方法2锐化处理：Unsharp Mask
-        #     blurred = cv2.GaussianBlur(mask, (3, 3), 0)
-        #     mask = cv2.addWeighted(mask, 2.0, blurred, -1.0, 0)
+        if self.sharpen_checkbox.isChecked():
+            # 方法1：卷积核锐化
+            # kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+            # mask = cv2.filter2D(mask, -1, kernel)
+            # 方法2锐化处理：Unsharp Mask
+            blurred = cv2.GaussianBlur(mask, (3, 3), 0)
+            mask = cv2.addWeighted(mask, 1.5, blurred, -0.5, 0)
 
         # 根据输出模式生成结果
         if self.output_mode == 0:
@@ -557,11 +557,6 @@ class HSVImageEditor(QMainWindow):
     #    self.param_labels[slider_name].setText(f"{value}")
     #    self.update_processed_image()
     # 3. 新增：高斯模糊核大小滑块释放时处理
-    def on_gaussian_kernel_size_value_change(self):
-        self.gaussian_kernel_size_value_label.setText(
-            str(self.gaussian_kernel_size_slider.value())
-        )
-
     def on_gaussian_kernel_size_release(self):
         self.gaussian_kernel_size_value_label.setText(
             str(self.gaussian_kernel_size_slider.value())
@@ -801,14 +796,10 @@ class HSVImageEditor(QMainWindow):
         # ✅ 新增：高斯模糊参数滑块
         gaussian_kernel_size_label = QLabel("高斯模糊核大小：")
         self.gaussian_kernel_size_slider = QSlider(Qt.Horizontal)
-        self.gaussian_kernel_size_slider.setRange(3, 15)
-        self.gaussian_kernel_size_slider.setSingleStep(2)
+        self.gaussian_kernel_size_slider.setRange(1, 10)
         self.gaussian_kernel_size_slider.setValue(3)
         self.gaussian_kernel_size_slider.sliderReleased.connect(
             self.on_gaussian_kernel_size_release
-        )
-        self.gaussian_kernel_size_slider.valueChanged.connect(
-            self.on_gaussian_kernel_size_value_change
         )
         gaussian_kernel_size_value_label = QLabel("3")
         gaussian_kernel_size_value_label.setAlignment(Qt.AlignRight)
@@ -824,16 +815,16 @@ class HSVImageEditor(QMainWindow):
         params_layout.addLayout(gaussian_layout)
         # -----------------------------------------
         # ✅ 新增：锐化处理开关复选框
-        # sharpen_layout = QVBoxLayout()
-        # sharpen_group = QGroupBox("锐化处理设置：（让图片细节更清晰）")
-        # sharpen_inner_layout = QGridLayout()
-        # self.sharpen_checkbox = QCheckBox("启用锐化处理")
-        # self.sharpen_checkbox.setChecked(False)
-        # self.sharpen_checkbox.stateChanged.connect(self.update_processed_image)
-        # sharpen_inner_layout.addWidget(self.sharpen_checkbox, 0, 0, 1, 3)
-        # sharpen_group.setLayout(sharpen_inner_layout)
-        # sharpen_layout.addWidget(sharpen_group)
-        # params_layout.addLayout(sharpen_layout)
+        sharpen_layout = QVBoxLayout()
+        sharpen_group = QGroupBox("锐化处理设置：（让图片细节更清晰）")
+        sharpen_inner_layout = QGridLayout()
+        self.sharpen_checkbox = QCheckBox("启用锐化处理")
+        self.sharpen_checkbox.setChecked(False)
+        self.sharpen_checkbox.stateChanged.connect(self.update_processed_image)
+        sharpen_inner_layout.addWidget(self.sharpen_checkbox, 0, 0, 1, 3)
+        sharpen_group.setLayout(sharpen_inner_layout)
+        sharpen_layout.addWidget(sharpen_group)
+        params_layout.addLayout(sharpen_layout)
 
         # 在init_ui方法的按钮布局部分修改
         btn_layout = QHBoxLayout()
