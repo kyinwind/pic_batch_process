@@ -98,43 +98,84 @@ class HSVImageEditor(QMainWindow):
         # 其他按键交给父类处理
         super().keyPressEvent(event)
 
-    # 添加双击事件处理方法
-    def on_orig_image_dblclick(self, event):
-        """双击原图时，用系统默认程序打开原图文件"""
-        if not self.file_list:
-            self.show_toast("没有图片可打开")
+    def on_image_click(self, event, label):
+        if self.img is None:
             return
 
-        # 获取原图路径
-        orig_path = os.path.join(self.input_folder, self.file_list[self.img_index])
-        if os.path.exists(orig_path):
-            try:
-                # 用系统默认程序打开文件
-                os.startfile(orig_path)
-            except Exception as e:
-                self.show_toast(f"打开失败：{str(e)}")
-        else:
-            self.show_toast(f"原图不存在：{orig_path}")
+        # --- 左键：设置放大中心 ---
+        if event.button() == Qt.LeftButton:
+            pixmap = label.pixmap()
+            if pixmap is None:
+                return
 
-    def on_processed_image_dblclick(self, event):
-        """双击处理结果时，用系统默认程序打开处理后的图片"""
-        if not self.file_list or self.processed_img is None:
-            self.show_toast("没有处理结果可打开")
-            return
+            x, y = event.pos().x(), event.pos().y()
+            pixmap_w, pixmap_h = pixmap.width(), pixmap.height()
+            label_w, label_h = label.width(), label.height()
 
-        # 生成处理后图片的保存路径（与保存当前图片的路径一致）
-        filename = self.file_list[self.img_index]
-        name, _ = os.path.splitext(filename)
-        processed_path = os.path.join(self.output_folder, f"{name}.png")
+            # 计算偏移量（居中时的空白边）
+            offset_x = (label_w - pixmap_w) // 2
+            offset_y = (label_h - pixmap_h) // 2
 
-        # 检查文件是否存在
-        if os.path.exists(processed_path):
-            try:
-                os.startfile(processed_path)
-            except Exception as e:
-                self.show_toast(f"打开失败：{str(e)}")
-        else:
-            self.show_toast("处理结果未保存，请先保存图片")
+            # 如果点击在空白处，忽略
+            if not (
+                offset_x <= x < offset_x + pixmap_w
+                and offset_y <= y < offset_y + pixmap_h
+            ):
+                return
+
+            # 转换为原图坐标
+            rel_x = (x - offset_x) / pixmap_w
+            rel_y = (y - offset_y) / pixmap_h
+
+            img_h, img_w = self.img.shape[:2]
+            self.zoom_center = (int(rel_x * img_w), int(rel_y * img_h))
+
+            print(f"🔍 放大中心更新为: {self.zoom_center}")
+            self.update_preview()
+
+        # --- 右键：用系统默认程序打开图片 ---
+        elif event.button() == Qt.RightButton:
+
+            if label == self.orig_label:
+
+                """双击原图时，用系统默认程序打开原图文件"""
+                if not self.file_list:
+                    self.show_toast("没有图片可打开")
+                    return
+
+                # 获取原图路径
+                orig_path = os.path.join(
+                    self.input_folder, self.file_list[self.img_index]
+                )
+                if os.path.exists(orig_path):
+                    try:
+                        # 用系统默认程序打开文件
+                        print(f"orig_path: {orig_path}")
+                        os.startfile(orig_path)
+                    except Exception as e:
+                        self.show_toast(f"打开失败：{str(e)}")
+                else:
+                    self.show_toast(f"原图不存在：{orig_path}")
+            elif label == self.processed_label:
+                """双击处理结果时，用系统默认程序打开处理后的图片"""
+                if not self.file_list or self.processed_img is None:
+                    self.show_toast("没有处理结果可打开")
+                    return
+                # 生成处理后图片的保存路径（与保存当前图片的路径一致）
+                filename = self.file_list[self.img_index]
+                name, _ = os.path.splitext(filename)
+                processed_path = os.path.join(self.output_folder, f"{name}.png")
+
+                # 检查文件是否存在
+                if os.path.exists(processed_path):
+                    try:
+                        os.startfile(processed_path)
+                    except Exception as e:
+                        self.show_toast(f"打开失败：{str(e)}")
+                else:
+                    self.show_toast("处理结果未保存，请先保存图片")
+            else:
+                return
 
     def show_toast(self, message):
         """显示一个短暂的提示窗口"""
@@ -259,7 +300,13 @@ class HSVImageEditor(QMainWindow):
         self.morph_kernel = np.ones((3, 3), np.uint8)
         # 最小连通区域面积，用于过滤小灰尘
         self.min_area = 50
-        self.enable_dust_removal = False  # ✅ 开关状态
+
+        # ✅ 新增：高斯模糊核大小
+        self.gaussian_kernel_size = 3
+        # ✅ 新增：局部放大图参数
+        self.zoom_size = 600  # 放大图尺寸（像素）
+        self.zoom_factor = 5  # 放大倍数
+        self.zoom_center = None  # 默认没有，表示用中心点
 
         # HSV 默认参数
         self.hsv_params = {
@@ -316,10 +363,11 @@ class HSVImageEditor(QMainWindow):
     def update_preview(self):
         if self.img is None:
             return  # 没有图像时不更新
+
+        # --- 左边原图和处理图 ---
         orig_pix = self.cv2_to_qpixmap(self.img)
         processed_pix = self.cv2_to_qpixmap(self.processed_img)
 
-        # ---- 根据窗口大小自适应缩放 ----
         available_width = self.orig_label.width()
         available_height = self.orig_label.height()
 
@@ -340,6 +388,40 @@ class HSVImageEditor(QMainWindow):
         self.processed_label.setPixmap(processed_scaled)
         self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
 
+        # --- 动态调整右侧放大图大小 ---
+        total_left_height = self.orig_label.height() + self.processed_label.height()
+        self.zoom_size = total_left_height // 2 - 20  # 每张放大图大约占一半高度
+
+        # --- 计算放大中心 ---
+        h, w = self.img.shape[:2]
+        if self.zoom_center is None:
+            center_x, center_y = w // 2, h // 2  # 默认取中心点
+        else:
+            center_x, center_y = self.zoom_center
+
+        half = self.zoom_size // (2 * self.zoom_factor)
+
+        # 确保不越界
+        x1, y1 = max(center_x - half, 0), max(center_y - half, 0)
+        x2, y2 = min(center_x + half, w), min(center_y + half, h)
+
+        roi_orig = self.img[y1:y2, x1:x2]
+        roi_proc = self.processed_img[y1:y2, x1:x2]
+
+        if roi_orig.size == 0 or roi_proc.size == 0:
+            return  # 无效区域
+
+        # --- 放大并显示 ---
+        zoomed_orig = cv2.resize(
+            roi_orig, (self.zoom_size, self.zoom_size), interpolation=cv2.INTER_CUBIC
+        )
+        zoomed_proc = cv2.resize(
+            roi_proc, (self.zoom_size, self.zoom_size), interpolation=cv2.INTER_CUBIC
+        )
+
+        self.zoom_orig_label.setPixmap(self.cv2_to_qpixmap(zoomed_orig))
+        self.zoom_processed_label.setPixmap(self.cv2_to_qpixmap(zoomed_proc))
+
     # 关键：当用户调整窗口大小时，强制刷新预览
     def resizeEvent(self, event):
         # 根据 Label 宽度重新生成色条
@@ -358,8 +440,14 @@ class HSVImageEditor(QMainWindow):
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         return img, hsv
 
-    def process_image(self):
-        # 显示繁忙鼠标图标
+    def process_image(self, img=None):
+        # 如果传入了 img，则用传入的；否则用 self.img（兼容实时处理）
+        if img is not None:
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        else:
+            img = self.img
+            hsv = self.hsv
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
 
         lower1 = np.array(
@@ -392,33 +480,19 @@ class HSVImageEditor(QMainWindow):
         )
 
         # 颜色区间掩码
-        mask1 = cv2.inRange(self.hsv, lower1, upper1)
-        mask2 = cv2.inRange(self.hsv, lower2, upper2)
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        mask2 = cv2.inRange(hsv, lower2, upper2)
         mask = cv2.bitwise_or(mask1, mask2)
-
-        # 默认的初始结果（没去灰尘时用）
-        if self.output_mode == 0:
-            cleaned = np.ones_like(self.img) * 255
-            cleaned[mask > 0] = self.img[mask > 0]
-        elif self.output_mode == 1:
-            background = np.ones_like(self.img) * 255
-            red_only = cv2.bitwise_and(self.img, self.img, mask=mask)
-            cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
-        else:
-            cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
         # ✅ 判断是否启用去灰尘
         if self.dust_checkbox.isChecked():
-            # 形态学开运算，去小灰尘
             mask = cv2.morphologyEx(
                 mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1
             )
-            # 闭运算，填充小缺口
             mask = cv2.morphologyEx(
                 mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1
             )
 
-            # 连通区域过滤，去除小面积区域
             num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
                 mask, connectivity=8
             )
@@ -427,22 +501,34 @@ class HSVImageEditor(QMainWindow):
                 if stats[i, cv2.CC_STAT_AREA] > self.min_area:
                     filtered_mask[labels == i] = 255
             mask = filtered_mask
+        # ✅ 判断是否启用高斯模糊
+        if self.gaussian_checkbox.isChecked():
+            # --- 高斯模糊平滑边缘 ---
+            mask = cv2.GaussianBlur(
+                mask, (self.gaussian_kernel_size, self.gaussian_kernel_size), 0
+            )
 
-        # --- 高斯模糊平滑边缘 ---
-        mask = cv2.GaussianBlur(mask, (3, 3), 0)
+        # --- 锐化处理 ---
+
+        if self.sharpen_checkbox.isChecked():
+            # 方法1：卷积核锐化
+            # kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+            # mask = cv2.filter2D(mask, -1, kernel)
+            # 方法2锐化处理：Unsharp Mask
+            blurred = cv2.GaussianBlur(mask, (3, 3), 0)
+            mask = cv2.addWeighted(mask, 1.5, blurred, -0.5, 0)
 
         # 根据输出模式生成结果
         if self.output_mode == 0:
-            cleaned = np.ones_like(self.img) * 255
-            cleaned[mask > 0] = self.img[mask > 0]
+            cleaned = np.ones_like(img) * 255
+            cleaned[mask > 0] = img[mask > 0]
         elif self.output_mode == 1:
-            background = np.ones_like(self.img) * 255
-            red_only = cv2.bitwise_and(self.img, self.img, mask=mask)
+            background = np.ones_like(img) * 255
+            red_only = cv2.bitwise_and(img, img, mask=mask)
             cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
         else:
             cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-        # 恢复默认鼠标图标
         QApplication.restoreOverrideCursor()
         return cleaned
 
@@ -470,6 +556,14 @@ class HSVImageEditor(QMainWindow):
     #    self.hsv_params[slider_name] = value
     #    self.param_labels[slider_name].setText(f"{value}")
     #    self.update_processed_image()
+    # 3. 新增：高斯模糊核大小滑块释放时处理
+    def on_gaussian_kernel_size_release(self):
+        self.gaussian_kernel_size_value_label.setText(
+            str(self.gaussian_kernel_size_slider.value())
+        )
+        if self.gaussian_checkbox.isChecked():
+            self.gaussian_kernel_size = self.gaussian_kernel_size_slider.value()
+            self.update_processed_image()
 
     def create_hsv_group(self, title, param_prefix):
         group = QGroupBox(title)
@@ -557,24 +651,72 @@ class HSVImageEditor(QMainWindow):
         main_layout.addLayout(hue_layout)
 
         # ------------------------------------------------------------------------------------------
-        preview_layout = QVBoxLayout()
+        # preview_layout = QVBoxLayout()
+        # self.orig_label = QLabel("原图")
+        # self.orig_label.setAlignment(Qt.AlignCenter)
+        # self.orig_label.mouseDoubleClickEvent = (
+        #     self.on_orig_image_dblclick
+        # )  # 绑定双击事件
+        # self.processed_label = QLabel("处理结果")
+        # self.processed_label.setAlignment(Qt.AlignCenter)
+        # self.processed_label.mouseDoubleClickEvent = (
+        #     self.on_processed_image_dblclick
+        # )  # 绑定双击事件
+
+        # splitter = QSplitter(Qt.Vertical)
+        # splitter.addWidget(self.orig_label)
+        # splitter.addWidget(self.processed_label)
+        # splitter.setSizes([600, 600])
+        # preview_layout.addWidget(splitter)
+        # main_layout.addLayout(preview_layout, stretch=1)
+
+        # -------------------------- 新增代码：局部放大图布局 --------------------------
+        # ---------------- 主图与局部放大图布局 ----------------
+        preview_container = QHBoxLayout()
+        preview_container.setSpacing(5)
+        # 左侧：主图（原图 + 处理图）
+        main_view_layout = QVBoxLayout()
         self.orig_label = QLabel("原图")
         self.orig_label.setAlignment(Qt.AlignCenter)
-        self.orig_label.mouseDoubleClickEvent = (
-            self.on_orig_image_dblclick
-        )  # 绑定双击事件
+
         self.processed_label = QLabel("处理结果")
         self.processed_label.setAlignment(Qt.AlignCenter)
-        self.processed_label.mouseDoubleClickEvent = (
-            self.on_processed_image_dblclick
-        )  # 绑定双击事件
+
+        self.orig_label.mousePressEvent = lambda e: self.on_image_click(
+            e, self.orig_label
+        )
+        self.processed_label.mousePressEvent = lambda e: self.on_image_click(
+            e, self.processed_label
+        )
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.orig_label)
         splitter.addWidget(self.processed_label)
         splitter.setSizes([600, 600])
-        preview_layout.addWidget(splitter)
-        main_layout.addLayout(preview_layout, stretch=1)
+        main_view_layout.addWidget(splitter)
+
+        # 右侧：局部放大图
+        zoom_layout = QVBoxLayout()
+        self.zoom_orig_label = QLabel("原图\n(中心放大×5)")
+        self.zoom_orig_label.setAlignment(Qt.AlignCenter)
+        self.zoom_orig_label.setStyleSheet("QLabel { background-color: #f0f0f0; }")
+        self.zoom_orig_label.setFixedWidth(self.zoom_size + 20)
+        self.zoom_orig_label.setFixedHeight(self.zoom_size + 40)
+
+        self.zoom_processed_label = QLabel("处理图\n(中心放大×5)")
+        self.zoom_processed_label.setAlignment(Qt.AlignCenter)
+        self.zoom_processed_label.setStyleSheet("QLabel { background-color: #f0f0f0; }")
+        self.zoom_processed_label.setFixedWidth(self.zoom_size + 20)
+        self.zoom_processed_label.setFixedHeight(self.zoom_size + 40)
+
+        zoom_layout.addWidget(self.zoom_orig_label)
+        zoom_layout.addWidget(self.zoom_processed_label)
+
+        # 组合左右
+        preview_container.addLayout(main_view_layout, stretch=3)
+        preview_container.addLayout(zoom_layout, stretch=1)  # 左右比例 3:1
+
+        main_layout.addLayout(preview_container, stretch=1)
 
         self.param_labels = {}
         params_layout = QHBoxLayout()
@@ -600,7 +742,9 @@ class HSVImageEditor(QMainWindow):
         self.dust_checkbox.setChecked(False)
         self.dust_checkbox.stateChanged.connect(self.update_processed_image)
 
-        kernel_size_label = QLabel("形态学核大小：")
+        kernel_size_label = QLabel(
+            "形态学核大小：（越大清除效果越明显，但也有误清除风险·，建议3-5）"
+        )
         self.kernel_size_slider = QSlider(Qt.Horizontal)
         self.kernel_size_slider.setRange(1, 10)
         self.kernel_size_slider.setValue(3)
@@ -611,7 +755,9 @@ class HSVImageEditor(QMainWindow):
         self.kernel_size_value_label = kernel_size_value_label
 
         # 最小连通面积滑块
-        min_area_label = QLabel("最小连通面积：")
+        min_area_label = QLabel(
+            "最小连通面积：（面积小于该值的区域将被认为是灰尘清除）"
+        )
         self.min_area_slider = QSlider(Qt.Horizontal)
         self.min_area_slider.setRange(10, 200)
         self.min_area_slider.setValue(self.min_area)
@@ -638,6 +784,47 @@ class HSVImageEditor(QMainWindow):
         params_layout.addLayout(group2)
         params_layout.addLayout(dust_layout)  # 将dust_layout添加到params_layout
         main_layout.addLayout(params_layout)  # 将params_layout添加到main_layout
+        # -----------------------------------------
+        # ✅ 新增：高斯模糊设置
+        gaussian_layout = QVBoxLayout()
+        gaussian_group = QGroupBox("高斯模糊设置：（让图片边缘更平滑）")
+        gaussian_inner_layout = QGridLayout()
+
+        self.gaussian_checkbox = QCheckBox("启用高斯模糊")
+        self.gaussian_checkbox.setChecked(False)
+        self.gaussian_checkbox.stateChanged.connect(self.update_processed_image)
+        # ✅ 新增：高斯模糊参数滑块
+        gaussian_kernel_size_label = QLabel("高斯模糊核大小：")
+        self.gaussian_kernel_size_slider = QSlider(Qt.Horizontal)
+        self.gaussian_kernel_size_slider.setRange(1, 10)
+        self.gaussian_kernel_size_slider.setValue(3)
+        self.gaussian_kernel_size_slider.sliderReleased.connect(
+            self.on_gaussian_kernel_size_release
+        )
+        gaussian_kernel_size_value_label = QLabel("3")
+        gaussian_kernel_size_value_label.setAlignment(Qt.AlignRight)
+        gaussian_kernel_size_value_label.setFixedWidth(50)
+        self.gaussian_kernel_size_value_label = gaussian_kernel_size_value_label
+
+        gaussian_inner_layout.addWidget(self.gaussian_checkbox, 0, 0, 1, 3)
+        gaussian_inner_layout.addWidget(gaussian_kernel_size_label, 1, 0)
+        gaussian_inner_layout.addWidget(self.gaussian_kernel_size_slider, 1, 1)
+        gaussian_inner_layout.addWidget(gaussian_kernel_size_value_label, 1, 2)
+        gaussian_group.setLayout(gaussian_inner_layout)
+        gaussian_layout.addWidget(gaussian_group)
+        params_layout.addLayout(gaussian_layout)
+        # -----------------------------------------
+        # ✅ 新增：锐化处理开关复选框
+        sharpen_layout = QVBoxLayout()
+        sharpen_group = QGroupBox("锐化处理设置：（让图片细节更清晰）")
+        sharpen_inner_layout = QGridLayout()
+        self.sharpen_checkbox = QCheckBox("启用锐化处理")
+        self.sharpen_checkbox.setChecked(False)
+        self.sharpen_checkbox.stateChanged.connect(self.update_processed_image)
+        sharpen_inner_layout.addWidget(self.sharpen_checkbox, 0, 0, 1, 3)
+        sharpen_group.setLayout(sharpen_inner_layout)
+        sharpen_layout.addWidget(sharpen_group)
+        params_layout.addLayout(sharpen_layout)
 
         # 在init_ui方法的按钮布局部分修改
         btn_layout = QHBoxLayout()
@@ -701,82 +888,26 @@ class HSVImageEditor(QMainWindow):
 
     def batch_save(self):
         print("📤 开始批量保存...")
-        # 显示繁忙鼠标图标
         QApplication.setOverrideCursor(Qt.WaitCursor)
+
         for idx, filename in enumerate(self.file_list):
             img_path = os.path.join(self.input_folder, filename)
             img = cv2.imread(img_path)
             if img is None:
                 print(f"⚠️ 跳过无法读取的图片：{filename}")
                 continue
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-            lower1 = np.array(
-                [
-                    self.hsv_params["H1_low"],
-                    self.hsv_params["S1_low"],
-                    self.hsv_params["V1_low"],
-                ]
-            )
-            upper1 = np.array(
-                [
-                    self.hsv_params["H1_high"],
-                    self.hsv_params["S1_high"],
-                    self.hsv_params["V1_high"],
-                ]
-            )
-            lower2 = np.array(
-                [
-                    self.hsv_params["H2_low"],
-                    self.hsv_params["S2_low"],
-                    self.hsv_params["V2_low"],
-                ]
-            )
-            upper2 = np.array(
-                [
-                    self.hsv_params["H2_high"],
-                    self.hsv_params["S2_high"],
-                    self.hsv_params["V2_high"],
-                ]
-            )
+            # --- 直接调用处理函数 ---
+            cleaned = self.process_image(img)
 
-            mask1 = cv2.inRange(hsv, lower1, upper1)
-            mask2 = cv2.inRange(hsv, lower2, upper2)
-            mask = cv2.bitwise_or(mask1, mask2)
-            if self.dust_checkbox.isChecked():
-                # 应用形态学操作和连通区域过滤（与实时处理一致）
-                mask = cv2.morphologyEx(
-                    mask, cv2.MORPH_OPEN, self.morph_kernel, iterations=1
-                )
-                mask = cv2.morphologyEx(
-                    mask, cv2.MORPH_CLOSE, self.morph_kernel, iterations=1
-                )
-                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-                    mask, connectivity=8
-                )
-                filtered_mask = np.zeros_like(mask)
-                for i in range(1, num_labels):
-                    if stats[i, cv2.CC_STAT_AREA] > self.min_area:
-                        filtered_mask[labels == i] = 255
-                mask = filtered_mask
-
-            if self.output_mode == 0:
-                cleaned = np.ones_like(img) * 255
-                cleaned[mask > 0] = img[mask > 0]
-            elif self.output_mode == 1:
-                background = np.ones_like(img) * 255
-                red_only = cv2.bitwise_and(img, img, mask=mask)
-                cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
-            else:
-                cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
+            # --- 保存结果 ---
             name, _ = os.path.splitext(filename)
             save_path = os.path.join(self.output_folder, f"{name}.png")
             cv2.imwrite(save_path, cleaned)
             print(f"✅ 已保存：{save_path}")
+
         print("🎉 批量保存完成！")
-        self.show_toast(f"批量处理成功!")
-        # 恢复默认鼠标图标
+        self.show_toast("批量处理成功!")
         QApplication.restoreOverrideCursor()
 
 
