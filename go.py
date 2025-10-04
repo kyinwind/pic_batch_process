@@ -504,6 +504,7 @@ class HSVImageEditor(QMainWindow):
         # ✅ 判断是否启用高斯模糊
         if self.gaussian_checkbox.isChecked():
             # --- 高斯模糊平滑边缘 ---
+            print(self.gaussian_kernel_size)
             mask = cv2.GaussianBlur(
                 mask, (self.gaussian_kernel_size, self.gaussian_kernel_size), 0
             )
@@ -558,6 +559,7 @@ class HSVImageEditor(QMainWindow):
     #    self.update_processed_image()
     # 3. 新增：高斯模糊核大小滑块释放时处理
     def on_gaussian_kernel_size_value_change(self):
+        self.gaussian_kernel_size = self.gaussian_kernel_size_slider.value()
         self.gaussian_kernel_size_value_label.setText(
             str(self.gaussian_kernel_size_slider.value())
         )
@@ -566,9 +568,12 @@ class HSVImageEditor(QMainWindow):
         self.gaussian_kernel_size_value_label.setText(
             str(self.gaussian_kernel_size_slider.value())
         )
-        if self.gaussian_checkbox.isChecked():
-            self.gaussian_kernel_size = self.gaussian_kernel_size_slider.value()
-            self.update_processed_image()
+        if self.gaussian_kernel_size_slider.value() % 2 == 1:
+            if self.gaussian_checkbox.isChecked():
+                self.gaussian_kernel_size = self.gaussian_kernel_size_slider.value()
+                self.update_processed_image()
+        else:
+            self.show_toast("高斯模糊核大小必须为奇数")
 
     def create_hsv_group(self, title, param_prefix):
         group = QGroupBox(title)
@@ -748,7 +753,7 @@ class HSVImageEditor(QMainWindow):
         self.dust_checkbox.stateChanged.connect(self.update_processed_image)
 
         kernel_size_label = QLabel(
-            "形态学核大小：（越大清除效果越明显，但也有误清除风险·，建议3-5）"
+            "形态学核大小：\n（越大清除效果越明显，但也有误清除风险·，建议3-5）"
         )
         self.kernel_size_slider = QSlider(Qt.Horizontal)
         self.kernel_size_slider.setRange(1, 10)
@@ -761,7 +766,7 @@ class HSVImageEditor(QMainWindow):
 
         # 最小连通面积滑块
         min_area_label = QLabel(
-            "最小连通面积：（面积小于该值的区域将被认为是灰尘清除）"
+            "最小连通面积：\n（面积小于该值的区域将被认为是灰尘清除）"
         )
         self.min_area_slider = QSlider(Qt.Horizontal)
         self.min_area_slider.setRange(10, 200)
@@ -792,7 +797,7 @@ class HSVImageEditor(QMainWindow):
         # -----------------------------------------
         # ✅ 新增：高斯模糊设置
         gaussian_layout = QVBoxLayout()
-        gaussian_group = QGroupBox("高斯模糊设置：（让图片边缘更平滑）")
+        gaussian_group = QGroupBox("高斯模糊设置：\n（让图片边缘更平滑）")
         gaussian_inner_layout = QGridLayout()
 
         self.gaussian_checkbox = QCheckBox("启用高斯模糊")
@@ -803,6 +808,7 @@ class HSVImageEditor(QMainWindow):
         self.gaussian_kernel_size_slider = QSlider(Qt.Horizontal)
         self.gaussian_kernel_size_slider.setRange(3, 15)
         self.gaussian_kernel_size_slider.setSingleStep(2)
+        self.gaussian_kernel_size_slider.setPageStep(2)
         self.gaussian_kernel_size_slider.setValue(3)
         self.gaussian_kernel_size_slider.sliderReleased.connect(
             self.on_gaussian_kernel_size_release
