@@ -17,7 +17,8 @@ from PyQt5.QtWidgets import (
     QCheckBox,
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent, QResizeEvent
+from typing import Optional
 
 
 # ----------------- 参数说明 -----------------
@@ -61,20 +62,25 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QGridLayout,
     QSplitter,
-    QComboBox,  # ✅ 新增
+    QComboBox,
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent
+from typing import Optional
 
 
 class HSVImageEditor(QMainWindow):
     # 重写键盘按下事件
-    def keyPressEvent(self, event):
-        key = event.key()
-        mod = event.modifiers()
+    def keyPressEvent(self, a0: Optional[QKeyEvent]):
+        if a0 is None:
+            return
+        key = a0.key()
+        mod = a0.modifiers()
         # print(f"按下键：{key}, 修饰符：{mod}")
         # 处理 + 号（包括小键盘 +）
-        if key == Qt.Key_Plus or (key == Qt.Key_Equal and mod == Qt.ShiftModifier):
+        if key == Qt.Key.Key_Plus or (
+            key == Qt.Key.Key_Equal and mod == Qt.KeyboardModifier.ShiftModifier
+        ):
             print(f"按下+键：{key}, 修饰符：{mod}")
             if self.h1_high_slider:
                 current = self.h1_high_slider.value()
@@ -85,7 +91,7 @@ class HSVImageEditor(QMainWindow):
             return  # 阻止继续传递
 
         # 处理 - 号（包括小键盘 -）
-        elif key == Qt.Key_Minus:
+        elif key == Qt.Key.Key_Minus:
             print(f"按下-键：{key}, 修饰符：{mod}")
             if self.h1_high_slider:
                 current = self.h1_high_slider.value()
@@ -96,14 +102,14 @@ class HSVImageEditor(QMainWindow):
             return
 
         # 其他按键交给父类处理
-        super().keyPressEvent(event)
+        super().keyPressEvent(a0)
 
     def on_image_click(self, event, label):
         if self.img is None:
             return
 
         # --- 左键：设置放大中心 ---
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             pixmap = label.pixmap()
             if pixmap is None:
                 return
@@ -134,7 +140,7 @@ class HSVImageEditor(QMainWindow):
             self.update_preview()
 
         # --- 右键：用系统默认程序打开图片 ---
-        elif event.button() == Qt.RightButton:
+        elif event.button() == Qt.MouseButton.RightButton:
 
             if label == self.orig_label:
 
@@ -195,7 +201,7 @@ class HSVImageEditor(QMainWindow):
         font.setPointSize(10)
         toast.setFont(font)
         # 设置对齐方式
-        toast.setAlignment(Qt.AlignCenter)
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # 调整大小
         toast.adjustSize()
         # 放置在窗口底部中间
@@ -248,10 +254,10 @@ class HSVImageEditor(QMainWindow):
 
     def save_current(self):
         print("💾 保存当前图片...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         # 取当前处理后的图像
-        cleaned = self.processed_img.copy()
+        cleaned = self.processed_img.copy()  # type: ignore
 
         # 生成保存路径
         filename = self.file_list[self.img_index]
@@ -305,7 +311,7 @@ class HSVImageEditor(QMainWindow):
         self.gaussian_kernel_size = 3
         # ✅ 新增：局部放大图参数
         self.zoom_size = 600  # 放大图尺寸（像素）
-        self.zoom_factor = 5  # 放大倍数
+        self.zoom_factor = 3  # 放大倍数
         self.zoom_center = None  # 默认没有，表示用中心点
 
         # HSV 默认参数
@@ -335,9 +341,11 @@ class HSVImageEditor(QMainWindow):
         assert self.hue_preview_img.dtype == np.uint8, "图像数据类型错误！应为np.uint8"
         # 4. 最后处理图像
         self.update_processed_image()
+        self.update_preview()
+        self.update_hue_preview()
         # 定时刷新
         self.timer = QTimer()
-        self.timer.setInterval(50)
+        self.timer.setInterval(500)
         self.timer.timeout.connect(self.update_preview)
         self.timer.start()
         self.update_preview()  # 添加此行确保初始加载时显示预览条
@@ -355,8 +363,8 @@ class HSVImageEditor(QMainWindow):
         pixmap = pixmap.scaled(
             self.hue_preview_label.width(),
             self.hue_preview_label.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
         self.hue_preview_label.setPixmap(pixmap)
 
@@ -374,14 +382,14 @@ class HSVImageEditor(QMainWindow):
         orig_scaled = orig_pix.scaled(
             available_width,
             available_height,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
         processed_scaled = processed_pix.scaled(
             available_width,
             available_height,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
 
         self.orig_label.setPixmap(orig_scaled)
@@ -389,9 +397,17 @@ class HSVImageEditor(QMainWindow):
         self.img_name_label.setText(f"当前图片：{self.file_list[self.img_index]}")
 
         # --- 动态调整右侧放大图大小 ---
-        total_left_height = self.orig_label.height() + self.processed_label.height()
-        self.zoom_size = total_left_height // 2 - 20  # 每张放大图大约占一半高度
-
+        # total_left_height = self.orig_label.height() + self.processed_label.height()
+        # self.zoom_size = total_left_height // 2 - 20  # 每张放大图大约占一半高度
+        right_height = self.zoom_orig_label.height()
+        self.zoom_size = right_height - 20
+        # screen = QApplication.primaryScreen()
+        # screen_height = screen.size().height() if screen else 1080
+        # if screen_height > 3000:
+        #     max_zoom_size = 600
+        # else:
+        #     max_zoom_size = 450
+        # self.zoom_size = min(right_height, max_zoom_size)  # 确保不超过可用高度
         # --- 计算放大中心 ---
         h, w = self.img.shape[:2]
         if self.zoom_center is None:
@@ -406,6 +422,8 @@ class HSVImageEditor(QMainWindow):
         x2, y2 = min(center_x + half, w), min(center_y + half, h)
 
         roi_orig = self.img[y1:y2, x1:x2]
+        if self.processed_img is None:
+            return  # 或 raise Exception("处理图像未生成")
         roi_proc = self.processed_img[y1:y2, x1:x2]
 
         if roi_orig.size == 0 or roi_proc.size == 0:
@@ -423,24 +441,26 @@ class HSVImageEditor(QMainWindow):
         self.zoom_processed_label.setPixmap(self.cv2_to_qpixmap(zoomed_proc))
 
     # 关键：当用户调整窗口大小时，强制刷新预览
-    def resizeEvent(self, event):
+    def resizeEvent(self, a0: Optional[QResizeEvent]):
+        if a0 is None:
+            return
         # 根据 Label 宽度重新生成色条
         if hasattr(self, "hue_preview_label") and self.hue_preview_label is not None:
             label_width = max(self.hue_preview_label.width(), 100)  # 避免太小
             self.hue_preview_img = self.create_hue_preview_image(width=label_width)
         self.update_preview()
         self.update_hue_preview()
-        super().resizeEvent(event)
+        super().resizeEvent(a0)
 
     def load_image(self, index):
         img_path = os.path.join(self.input_folder, self.file_list[index])
-        img = cv2.imread(img_path)
+        img: np.ndarray = cv2.imread(img_path)
         if img is None:
             raise ValueError(f"❌ 无法读取图片：{img_path}")
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         return img, hsv
 
-    def process_image(self, img=None):
+    def process_image(self, img: Optional[np.ndarray] = None):
         # 如果传入了 img，则用传入的；否则用 self.img（兼容实时处理）
         if img is not None:
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -448,7 +468,7 @@ class HSVImageEditor(QMainWindow):
             img = self.img
             hsv = self.hsv
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         lower1 = np.array(
             [
@@ -525,7 +545,7 @@ class HSVImageEditor(QMainWindow):
             cleaned[mask > 0] = img[mask > 0]
         elif self.output_mode == 1:
             background = np.ones_like(img) * 255
-            red_only = cv2.bitwise_and(img, img, mask=mask)
+            red_only = cv2.bitwise_and(img, img, mask=mask.astype(np.uint8))
             cleaned = cv2.addWeighted(red_only, 1.0, background, 0.0, 0)
         else:
             cleaned = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -592,7 +612,7 @@ class HSVImageEditor(QMainWindow):
 
         for row, (param_key, slider_range, label_text) in enumerate(params):
             label = QLabel(label_text)
-            slider = QSlider(Qt.Horizontal)
+            slider = QSlider(Qt.Orientation.Horizontal)
             slider.setRange(*slider_range)
             slider.setValue(self.hsv_params[param_key])
 
@@ -607,7 +627,7 @@ class HSVImageEditor(QMainWindow):
             # - 释放时触发：处理图像
             slider.sliderReleased.connect(lambda k=param_key: self.on_slider_release(k))
             value_label = QLabel(str(self.hsv_params[param_key]))
-            value_label.setAlignment(Qt.AlignRight)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
             value_label.setFixedWidth(50)
             self.param_labels[param_key] = value_label
 
@@ -644,7 +664,7 @@ class HSVImageEditor(QMainWindow):
         main_layout.addLayout(select_layout)
         # -------------------------------------------------
         self.img_name_label = QLabel(f"当前图片：{self.file_list[self.img_index]}")
-        self.img_name_label.setAlignment(Qt.AlignCenter)
+        self.img_name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.img_name_label)
         # -------------------------- 新增代码：H色调预览条布局 --------------------------
         hue_layout = QHBoxLayout()
@@ -687,10 +707,10 @@ class HSVImageEditor(QMainWindow):
         # 左侧：主图（原图 + 处理图）
         main_view_layout = QVBoxLayout()
         self.orig_label = QLabel("原图")
-        self.orig_label.setAlignment(Qt.AlignCenter)
+        self.orig_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.processed_label = QLabel("处理结果")
-        self.processed_label.setAlignment(Qt.AlignCenter)
+        self.processed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.orig_label.mousePressEvent = lambda e: self.on_image_click(
             e, self.orig_label
@@ -699,7 +719,7 @@ class HSVImageEditor(QMainWindow):
             e, self.processed_label
         )
 
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self.orig_label)
         splitter.addWidget(self.processed_label)
         splitter.setSizes([600, 600])
@@ -708,16 +728,19 @@ class HSVImageEditor(QMainWindow):
         # 右侧：局部放大图
         zoom_layout = QVBoxLayout()
         self.zoom_orig_label = QLabel("原图\n(中心放大×5)")
-        self.zoom_orig_label.setAlignment(Qt.AlignCenter)
+        self.zoom_orig_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_orig_label.setStyleSheet("QLabel { background-color: #f0f0f0; }")
         self.zoom_orig_label.setFixedWidth(self.zoom_size + 20)
-        self.zoom_orig_label.setFixedHeight(self.zoom_size + 40)
-
+        # self.zoom_orig_label.setFixedHeight(self.zoom_size + 40)
+        self.zoom_orig_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.zoom_processed_label = QLabel("处理图\n(中心放大×5)")
-        self.zoom_processed_label.setAlignment(Qt.AlignCenter)
+        self.zoom_processed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_processed_label.setStyleSheet("QLabel { background-color: #f0f0f0; }")
         self.zoom_processed_label.setFixedWidth(self.zoom_size + 20)
-        self.zoom_processed_label.setFixedHeight(self.zoom_size + 40)
+        # self.zoom_processed_label.setFixedHeight(self.zoom_size + 40)
+        self.zoom_processed_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
 
         zoom_layout.addWidget(self.zoom_orig_label)
         zoom_layout.addWidget(self.zoom_processed_label)
@@ -755,12 +778,12 @@ class HSVImageEditor(QMainWindow):
         kernel_size_label = QLabel(
             "形态学核大小：\n（越大清除效果越明显，但也有误清除风险·，建议3-5）"
         )
-        self.kernel_size_slider = QSlider(Qt.Horizontal)
+        self.kernel_size_slider = QSlider(Qt.Orientation.Horizontal)
         self.kernel_size_slider.setRange(1, 10)
         self.kernel_size_slider.setValue(3)
         self.kernel_size_slider.sliderReleased.connect(self.on_kernel_size_release)
         kernel_size_value_label = QLabel("3")
-        kernel_size_value_label.setAlignment(Qt.AlignRight)
+        kernel_size_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         kernel_size_value_label.setFixedWidth(50)
         self.kernel_size_value_label = kernel_size_value_label
 
@@ -768,12 +791,12 @@ class HSVImageEditor(QMainWindow):
         min_area_label = QLabel(
             "最小连通面积：\n（面积小于该值的区域将被认为是灰尘清除）"
         )
-        self.min_area_slider = QSlider(Qt.Horizontal)
+        self.min_area_slider = QSlider(Qt.Orientation.Horizontal)
         self.min_area_slider.setRange(10, 200)
         self.min_area_slider.setValue(self.min_area)
         self.min_area_slider.sliderReleased.connect(self.on_min_area_release)
         min_area_value_label = QLabel(str(self.min_area))
-        min_area_value_label.setAlignment(Qt.AlignRight)
+        min_area_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         min_area_value_label.setFixedWidth(50)
         self.min_area_value_label = min_area_value_label
 
@@ -805,7 +828,7 @@ class HSVImageEditor(QMainWindow):
         self.gaussian_checkbox.stateChanged.connect(self.update_processed_image)
         # ✅ 新增：高斯模糊参数滑块
         gaussian_kernel_size_label = QLabel("高斯模糊核大小：")
-        self.gaussian_kernel_size_slider = QSlider(Qt.Horizontal)
+        self.gaussian_kernel_size_slider = QSlider(Qt.Orientation.Horizontal)
         self.gaussian_kernel_size_slider.setRange(3, 15)
         self.gaussian_kernel_size_slider.setSingleStep(2)
         self.gaussian_kernel_size_slider.setPageStep(2)
@@ -817,7 +840,7 @@ class HSVImageEditor(QMainWindow):
             self.on_gaussian_kernel_size_value_change
         )
         gaussian_kernel_size_value_label = QLabel("3")
-        gaussian_kernel_size_value_label.setAlignment(Qt.AlignRight)
+        gaussian_kernel_size_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         gaussian_kernel_size_value_label.setFixedWidth(50)
         self.gaussian_kernel_size_value_label = gaussian_kernel_size_value_label
 
@@ -870,7 +893,7 @@ class HSVImageEditor(QMainWindow):
         btn_layout.addWidget(self.quit_btn)
         main_layout.addLayout(btn_layout)
         # 确保窗口获得焦点，以便接收键盘事件
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
 
     # 1. 形态学核大小滑块：释放时处理
@@ -903,7 +926,7 @@ class HSVImageEditor(QMainWindow):
 
     def batch_save(self):
         print("📤 开始批量保存...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         for idx, filename in enumerate(self.file_list):
             img_path = os.path.join(self.input_folder, filename)
