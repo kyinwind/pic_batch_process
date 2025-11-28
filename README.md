@@ -11,3 +11,12 @@ python go.py
 
 
 ![主界面](ui.png)
+
+快捷键：
+alt + p 上一张
+alt + n 下一张
+alt + s 保存当前图片
+alt + b 批量保存所有图片
+alt + q 退出
++ 调高h1高的值+1
+- 调低h1高的值-1
