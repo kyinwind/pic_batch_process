@@ -6,6 +6,10 @@ pip install opencv-python numpy pyqt5
 
 安装opencv，numpy
 
+如果有gpu，安装torch，Kornia
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install Kornia
+
 3、运行
 python go.py
 

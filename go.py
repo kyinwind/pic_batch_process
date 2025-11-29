@@ -29,7 +29,7 @@ except Exception:
     TORCH_GPU_AVAILABLE = False
 
 # ⚡ 建议提前设置 PyTorch 可扩展内存，减少碎片化
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
 
 # ----------------- 参数说明 -----------------
 # LowH1 / HighH1 : 第1段红色的色调范围（Hue）
@@ -471,162 +471,241 @@ class HSVImageEditor(QMainWindow):
         return img, hsv
 
     def process_image(self, img: Optional[np.ndarray] = None):
-        """
-        GPU：PyTorch + Kornia（FP16，加强显存回收）
-        CPU：原始 CPU 逻辑
-        """
-        # 如果传入 img，直接使用传入的，否则用 self.img（与原逻辑一致）
+        import os
+        # 尝试设置 PyTorch 的可扩展 segment allocator，显著降低碎片（若已设置则不覆盖）
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
         target_img = img if img is not None else self.img
         if target_img is None:
             return None
-        # 优先使用 PyTorch+Kornia 在 GPU 上运行（若可用）
-        if TORCH_GPU_AVAILABLE:
+
+        # 每次开始前尝试清理 CUDA cache，减少碎片影响（若没有 GPU 也安全）
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+
+        # 内部：对单张 numpy 图像在 GPU 上的处理（与原逻辑基本一致）
+        def gpu_process_numpy_image(np_img: np.ndarray) -> np.ndarray:
+            """
+            输入：H x W x BGR numpy uint8
+            返回：H x W x BGR numpy uint8（处理结果）
+            """
+            # 下面的实现和你已验过的 pipeline 一致，但做了更稳健的局部变量管理
+            rgb = np_img[..., ::-1].copy()
+            t = (
+                torch.from_numpy(rgb)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .cuda()
+                .half()
+                / 255.0
+            )  # [1,3,H,W]
+
             try:
-                # 限制本进程使用 GPU 显存
-                torch.cuda.set_per_process_memory_fraction(0.8)
+                # RGB -> HSV
+                hsv = K.color.rgb_to_hsv(t)  # [1,3,H,W]
+                H = hsv[:, 0:1, :, :]
+                S = hsv[:, 1:2, :, :]
+                V = hsv[:, 2:3, :, :]
 
-                with torch.no_grad():  # 🔥 强制无梯度模式，大幅减少显存
-                    # -------------------------
-                    # 1) NumPy BGR → Torch RGB(FP16)
-                    # -------------------------
-                    rgb = target_img[..., ::-1].copy()
-                    t = (
-                        torch.from_numpy(rgb)
-                        .permute(2, 0, 1)
-                        .unsqueeze(0)
-                        .cuda()
-                        .half()
-                        / 255.0
-                    )
-
-                    # -------------------------
-                    # 2) RGB → HSV (0..1)
-                    # -------------------------
-                    hsv = K.color.rgb_to_hsv(t)
-
-                    # 映射到 OpenCV 范围
-                    scale = torch.tensor([180.0, 255.0, 255.0], device=t.device).view(1, 3, 1, 1)
-                    hsv_cv = hsv * scale
-
-                    # 必须用 0:1、1:2、2:3 才能保留通道维度
-                    H_opencv = hsv_cv[:, 0:1, :, :]
-                    S_opencv = hsv_cv[:, 1:2, :, :]
-                    V_opencv = hsv_cv[:, 2:3, :, :]
-
-                    # -------------------------
-                    # 3) HSV range mask（等价 OpenCV inRange）
-                    # -------------------------
-                    def build_mask(h1, h2, s1, s2, v1, v2):
-                        h1, h2 = float(h1), float(h2)
-                        s1, s2 = float(s1), float(s2)
-                        v1, v2 = float(v1), float(v2)
-
-                        # Hue 环绕
-                        if h1 <= h2:
-                            mh = (H_opencv >= h1) & (H_opencv <= h2)
-                        else:
-                            mh = (H_opencv >= h1) | (H_opencv <= h2)
-
-                        ms = (S_opencv >= s1) & (S_opencv <= s2)
-                        mv = (V_opencv >= v1) & (V_opencv <= v2)
-
-                        return (mh & ms & mv).float()
-
-                    m1 = build_mask(
-                        self.hsv_params["H1_low"], 
-                        self.hsv_params["H1_high"],
-                        self.hsv_params["S1_low"], 
-                        self.hsv_params["S1_high"],
-                        self.hsv_params["V1_low"], 
-                        self.hsv_params["V1_high"]
-                    )
-                    m2 = build_mask(
-                        self.hsv_params["H2_low"], 
-                        self.hsv_params["H2_high"],
-                        self.hsv_params["S2_low"], 
-                        self.hsv_params["S2_high"],
-                        self.hsv_params["V2_low"], 
-                        self.hsv_params["V2_high"]
-                    )
-
-                    mask = ((m1 + m2) > 0).float()
-
-                    # -------------------------
-                    # 4) 可选：高斯模糊
-                    # -------------------------
-                    if self.gaussian_checkbox.isChecked():
-                        gks = self.gaussian_kernel_size
-                        mask = K.filters.gaussian_blur2d(mask, (gks, gks), (0.0, 0.0))
-
-                    # -------------------------
-                    # 5) 形态学去噪
-                    # -------------------------
-                    if self.dust_checkbox.isChecked():
-                        kern = torch.ones(
-                            (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
-                            device=mask.device,
-                        )
-                        bin_mask = (mask > 0.5).float()
-                        bin_mask = K.morphology.dilation(bin_mask, kern)
-                        bin_mask = K.morphology.erosion(bin_mask, kern)
-                        mask = bin_mask
-
-                    # -------------------------
-                    # 6) 输出模式
-                    # -------------------------
-                    mask_3 = torch.cat([mask, mask, mask], dim=1)
-
-                    if self.output_mode == 0:
-                        white = torch.ones_like(t)
-                        cleaned_t = t * mask_3 + white * (1 - mask_3)
-                    elif self.output_mode == 1:
-                        cleaned_t = t * mask_3
-                    else:
-                        cleaned_t = mask_3
-
-                    # -------------------------
-                    # 7) GPU → CPU NumPy
-                    # -------------------------
-                    cleaned_np = (
-                        (cleaned_t.clamp(0, 1) * 255.0)
-                        .byte()
-                        .squeeze(0)
-                        .permute(1, 2, 0)
-                        .cpu()
-                        .numpy()
-                    )
-                    cleaned_bgr = cleaned_np[..., ::-1]
-
-                # -------------------------
-                # 🔥 显存回收
-                # -------------------------
-                del t, hsv, hsv_cv, m1, m2, mask, mask_3
-                if 'bin_mask' in locals():
-                    del bin_mask
-                if 'cleaned_t' in locals():
-                    del cleaned_t
-                torch.cuda.synchronize()
+                del hsv
                 torch.cuda.empty_cache()
 
+                # map to OpenCV ranges in-place
+                H.mul_(180.0)
+                S.mul_(255.0)
+                V.mul_(255.0)
+
+                def build_mask_local(h1, h2, s1, s2, v1, v2):
+                    h1, h2 = float(h1), float(h2)
+                    s1, s2 = float(s1), float(s2)
+                    v1, v2 = float(v1), float(v2)
+
+                    if h1 <= h2:
+                        mh = (H >= h1) & (H <= h2)
+                    else:
+                        mh = (H >= h1) | (H <= h2)
+
+                    ms = (S >= s1) & (S <= s2)
+                    mv = (V >= v1) & (V <= v2)
+                    return (mh & ms & mv).float()
+
+                m1 = build_mask_local(
+                    self.hsv_params["H1_low"], self.hsv_params["H1_high"],
+                    self.hsv_params["S1_low"], self.hsv_params["S1_high"],
+                    self.hsv_params["V1_low"], self.hsv_params["V1_high"],
+                )
+                m2 = build_mask_local(
+                    self.hsv_params["H2_low"], self.hsv_params["H2_high"],
+                    self.hsv_params["S2_low"], self.hsv_params["S2_high"],
+                    self.hsv_params["V2_low"], self.hsv_params["V2_high"],
+                )
+
+                mask = ((m1 + m2) > 0).float()
+
+                # 释放 H/S/V（后面不需要）
+                try:
+                    del H, S, V
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
+
+                # 可选高斯模糊
+                if self.gaussian_checkbox.isChecked():
+                    gks = self.gaussian_kernel_size
+                    mask = K.filters.gaussian_blur2d(mask, (gks, gks), (0.0, 0.0))
+
+                # 形态学
+                bin_mask = None
+                if self.dust_checkbox.isChecked():
+                    kern = torch.ones(
+                        (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
+                        device=mask.device,
+                    )
+                    bin_mask = (mask > 0.5).float()
+                    bin_mask = K.morphology.dilation(bin_mask, kern)
+                    bin_mask = K.morphology.erosion(bin_mask, kern)
+                    mask = bin_mask
+
+                # 输出
+                mask_3 = torch.cat([mask, mask, mask], dim=1)  # [1,3,H,W]
+
+                if self.output_mode == 0:
+                    white = torch.ones_like(t)
+                    cleaned_t = t * mask_3 + white * (1 - mask_3)
+                elif self.output_mode == 1:
+                    cleaned_t = t * mask_3
+                else:
+                    cleaned_t = mask_3
+
+                # 转回 CPU numpy
+                cleaned_np = (
+                    (cleaned_t.clamp(0, 1) * 255.0)
+                    .byte()
+                    .squeeze(0)
+                    .permute(1, 2, 0)
+                    .cpu()
+                    .numpy()
+                )
+                cleaned_bgr = cleaned_np[..., ::-1]
                 return cleaned_bgr
 
-            except Exception as e:
-                print("GPU processing failed, fallback to CPU. Reason:", e)
-
+            finally:
+                # 局部清理（尽可能释放 GPU 张量）
+                for vname in ("t", "m1", "m2", "mask", "mask_3", "cleaned_t"):
+                    if vname in locals():
+                        try:
+                            del locals()[vname]
+                        except Exception:
+                            # 不能直接删除 locals() 某些实现会失败，尝试 getattr del
+                            try:
+                                del globals()[vname]
+                            except Exception:
+                                pass
                 try:
-                    if hasattr(self, "compute_device_combo") and self.compute_device_combo is not None:
-                        self.compute_device_combo.setCurrentIndex(1)
-                except:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
+
+        # 内部：tile 分块处理函数（当单次处理 OOM 时回退使用）
+        def process_image_tilewise(np_img: np.ndarray, tile_size: int = 2048, overlap: int = 0) -> np.ndarray:
+            """
+            将大图切成 tile（不重叠或带少量 overlap），逐块调用 gpu_process_numpy_image，并拼回。
+            tile_size 建议 1024/1536/2048 等，根据显存调整；默认 2048 对 6GB 显存通常稳妥。
+            overlap 用来减少缝隙（若为0，会更快）。此实现简单直接，不使用复杂融合。
+            """
+            h, w = np_img.shape[:2]
+            # compute tile coordinates (non-overlapping except optional overlap)
+            ys = list(range(0, h, tile_size - overlap if tile_size > overlap else tile_size))
+            xs = list(range(0, w, tile_size - overlap if tile_size > overlap else tile_size))
+
+            out = np.zeros_like(np_img)
+            for y in ys:
+                for x in xs:
+                    y1 = y
+                    x1 = x
+                    y2 = min(y + tile_size, h)
+                    x2 = min(x + tile_size, w)
+                    tile = np_img[y1:y2, x1:x2].copy()
+                    try:
+                        processed_tile = gpu_process_numpy_image(tile)
+                    except RuntimeError as re:
+                        # tile 也 OOM（极少见）：退回 CPU 处理该 tile
+                        print("Tile GPU OOM, fallback to CPU for tile:", re)
+                        try:
+                            processed_tile = self.process_image_cpu(tile)
+                        except Exception as e:
+                            print("CPU fallback for tile failed:", e)
+                            processed_tile = tile  # 失败就返回原 tile，保证不崩溃
+                    # paste back
+                    out[y1:y2, x1:x2] = processed_tile
+            return out
+
+        # 判断图片是否过大：超过此尺寸直接 tile 处理
+        H_img, W_img = target_img.shape[:2]
+        IS_LARGE = max(H_img, W_img) >= 2000    # 建议阈值：3500~4000
+        # 尝试单次整体 GPU 处理；若失败则走 tile 分块策略
+        if TORCH_GPU_AVAILABLE:
+            try:
+                # 限制本进程使用的分数（可按需调整）
+                try:
+                    torch.cuda.set_per_process_memory_fraction(0.9)
+                except Exception:
                     pass
 
-        # -------------------------
-        # CPU fallback
-        # -------------------------
+                if not IS_LARGE:
+                    # 小图（例如 2K 或以下），允许整图 GPU 处理
+                    try:
+                        return gpu_process_numpy_image(target_img)
+                    except RuntimeError as e:
+                        print("Full GPU failed, fallback. Reason:", e)
+                else:
+                    # 大图，直接走 tile 分块处理
+                    print("大图检测到，直接使用 tile 分块 GPU 处理...")
+                    try:
+                        result = process_image_tilewise(target_img, tile_size=2048, overlap=0)
+                        return result
+                    except RuntimeError as e:
+                        print("Tilewise GPU processing failed:", e)
+
+            except RuntimeError as e:
+                msg = str(e)
+                print("GPU 处理失败, fallback. Reason:", msg)
+
+                # 如果是 GPU OOM 或者 PyTorch 分配问题，尝试 tile 分块处理
+                if "out of memory" in msg.lower() or "tried to allocate" in msg.lower() or "memory" in msg.lower():
+                    # 在这里尝试更保守的 tile_size（6GB GPU 上 2048 通常稳妥）
+                    try:
+                        print("尝试切割小图处理...")
+                        result = process_image_tilewise(target_img, tile_size=2048, overlap=0)
+                        return result
+                    except Exception as e2:
+                        print("Tilewise GPU processing also failed:", e2)
+                        # 最后退到 CPU 全图处理
+                        try:
+                            return self.process_image_cpu(target_img)
+                        except Exception as e3:
+                            print("CPU processing also failed:", e3)
+                            return None
+                else:
+                    # 其他非 OOM 错误，直接回退 CPU
+                    try:
+                        return self.process_image_cpu(target_img)
+                    except Exception as e4:
+                        print("CPU processing also failed:", e4)
+                        return None
+
+        # 最终 CPU fallback（如果没有 GPU 或 GPU 路径未成功）
         try:
             return self.process_image_cpu(target_img)
         except Exception as e:
             print("CPU processing also failed:", e)
             return None
+
+
 
     def process_image_cpu(self, img: Optional[np.ndarray] = None):
         # 如果传入了 img，则用传入的；否则用 self.img（兼容实时处理）
@@ -722,7 +801,14 @@ class HSVImageEditor(QMainWindow):
         return cleaned
 
     def update_processed_image(self):
-        self.processed_img = self.process_image()
+        try:
+            # 修复：PyQt5 用 Qt.WaitCursor 替代 QApplication.CursorShape.WaitCursor
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.processed_img = self.process_image()
+        finally:
+            # 恢复默认光标
+            QApplication.restoreOverrideCursor()
+
 
     def cv2_to_qpixmap(self, cv_img):
         if cv_img is None or cv_img.size == 0 or cv_img.dtype != np.uint8:
