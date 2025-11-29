@@ -28,6 +28,9 @@ try:
 except Exception:
     TORCH_GPU_AVAILABLE = False
 
+# ⚡ 建议提前设置 PyTorch 可扩展内存，减少碎片化
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
+
 # ----------------- 参数说明 -----------------
 # LowH1 / HighH1 : 第1段红色的色调范围（Hue）
 #   - 建议范围：0–10
@@ -469,8 +472,8 @@ class HSVImageEditor(QMainWindow):
 
     def process_image(self, img: Optional[np.ndarray] = None):
         """
-        优先使用 PyTorch+Kornia（GPU），但在 GPU 上我们把 HSV 映射回 OpenCV 的尺度并用等价的 inRange 判定，
-        以保证 CPU/GPU 阈值语义一致。GPU 失败时回退 CPU。
+        GPU：PyTorch + Kornia（FP16，加强显存回收）
+        CPU：原始 CPU 逻辑
         """
         # 如果传入 img，直接使用传入的，否则用 self.img（与原逻辑一致）
         target_img = img if img is not None else self.img
@@ -479,270 +482,151 @@ class HSVImageEditor(QMainWindow):
         # 优先使用 PyTorch+Kornia 在 GPU 上运行（若可用）
         if TORCH_GPU_AVAILABLE:
             try:
+                # 限制本进程使用 GPU 显存
                 torch.cuda.set_per_process_memory_fraction(0.8)
 
-                # numpy BGR -> torch RGB (0..1)
-                rgb = target_img[..., ::-1].copy()
-                t = (
-                    torch.from_numpy(rgb)
-                    .float()
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    / 255.0
-                ).cuda()
-
-                # RGB -> HSV (Kornia: H,S,V in [0,1])
-                hsv = K.color.rgb_to_hsv(t)  # shape (1,3,H,W)
-                H = hsv[:, 0:1, :, :]  # [0,1]
-                S = hsv[:, 1:2, :, :]
-                V = hsv[:, 2:3, :, :]
-
-                # —— 关键：把 Kornia 的 [0,1] 映回 OpenCV 尺度（H:0..180, S/V:0..255）
-                H_opencv = (H * 180.0)  # float tensor, same scale as cv2.cvtColor(..., HSV). H in [0,180]
-                S_opencv = (S * 255.0)
-                V_opencv = (V * 255.0)
-
-                # 小 helper：根据 OpenCV 风格（含环绕）生成二值掩码（0/1 float）
-                def build_mask_opencv(h_low, h_high, s_low, s_high, v_low, v_high):
-                    # 接受原始 UI 值（H:0..180, S/V:0..255）
-                    h_low_f = float(h_low)
-                    h_high_f = float(h_high)
-                    s_low_f = float(s_low)
-                    s_high_f = float(s_high)
-                    v_low_f = float(v_low)
-                    v_high_f = float(v_high)
-
-                    # H 环绕判断（OpenCV inRange 风格）
-                    if h_low_f <= h_high_f:
-                        mh = (H_opencv >= h_low_f) & (H_opencv <= h_high_f)
-                    else:
-                        mh = (H_opencv >= h_low_f) | (H_opencv <= h_high_f)
-
-                    ms = (S_opencv >= s_low_f) & (S_opencv <= s_high_f)
-                    mv = (V_opencv >= v_low_f) & (V_opencv <= v_high_f)
-
-                    return (mh & ms & mv).to(dtype=torch.float32)  # 0/1 float
-
-                m1 = build_mask_opencv(
-                    self.hsv_params["H1_low"],
-                    self.hsv_params["H1_high"],
-                    self.hsv_params["S1_low"],
-                    self.hsv_params["S1_high"],
-                    self.hsv_params["V1_low"],
-                    self.hsv_params["V1_high"],
-                )
-                m2 = build_mask_opencv(
-                    self.hsv_params["H2_low"],
-                    self.hsv_params["H2_high"],
-                    self.hsv_params["S2_low"],
-                    self.hsv_params["S2_high"],
-                    self.hsv_params["V2_low"],
-                    self.hsv_params["V2_high"],
-                )
-
-                mask = ((m1 + m2) > 0).to(dtype=torch.float32)  # 二值 0/1
-
-                # 如果你需要严格模仿 CPU 的行为（cv2.inRange 返回 0/255 uint8），可以：
-                # mask_255 = (mask * 255.0).to(dtype=torch.uint8)
-
-                # 可选：高斯模糊（如果启用）
-                if self.gaussian_checkbox.isChecked():
-                    gks = self.gaussian_kernel_size
-                    # Kornia 的 gaussian_blur2d 要求 kernel 是奇数，sigma 可以留 0 让函数自行计算
-                    mask = K.filters.gaussian_blur2d(mask, (gks, gks), (0.0, 0.0))
-
-                    # 如果你希望模糊后再恢复为二值（像 CPU 的开/闭），可在此加阈值：
-                    # mask = (mask > 0.5).to(dtype=torch.float32)
-
-                # 可选：形态学去噪（近似 OpenCV 的 MORPH_OPEN / CLOSE）
-                if self.dust_checkbox.isChecked():
-                    kern = torch.ones(
-                        (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
-                        device=mask.device,
+                with torch.no_grad():  # 🔥 强制无梯度模式，大幅减少显存
+                    # -------------------------
+                    # 1) NumPy BGR → Torch RGB(FP16)
+                    # -------------------------
+                    rgb = target_img[..., ::-1].copy()
+                    t = (
+                        torch.from_numpy(rgb)
+                        .permute(2, 0, 1)
+                        .unsqueeze(0)
+                        .cuda()
+                        .half()
+                        / 255.0
                     )
-                    bin_mask = (mask > 0.5).to(dtype=torch.float32)
-                    bin_mask = K.morphology.dilation(bin_mask, kern)
-                    bin_mask = K.morphology.erosion(bin_mask, kern)
-                    mask = bin_mask
 
-                # 输出模式：为了尽量一致，先把 mask 作为 0/1，再决定如何合成
-                if self.output_mode == 0:
-                    # 白底红字: 保持像 CPU 那样，按 mask 直接选择像素或白色
+                    # -------------------------
+                    # 2) RGB → HSV (0..1)
+                    # -------------------------
+                    hsv = K.color.rgb_to_hsv(t)
+
+                    # 映射到 OpenCV 范围
+                    scale = torch.tensor([180.0, 255.0, 255.0], device=t.device).view(1, 3, 1, 1)
+                    hsv_cv = hsv * scale
+
+                    # 必须用 0:1、1:2、2:3 才能保留通道维度
+                    H_opencv = hsv_cv[:, 0:1, :, :]
+                    S_opencv = hsv_cv[:, 1:2, :, :]
+                    V_opencv = hsv_cv[:, 2:3, :, :]
+
+                    # -------------------------
+                    # 3) HSV range mask（等价 OpenCV inRange）
+                    # -------------------------
+                    def build_mask(h1, h2, s1, s2, v1, v2):
+                        h1, h2 = float(h1), float(h2)
+                        s1, s2 = float(s1), float(s2)
+                        v1, v2 = float(v1), float(v2)
+
+                        # Hue 环绕
+                        if h1 <= h2:
+                            mh = (H_opencv >= h1) & (H_opencv <= h2)
+                        else:
+                            mh = (H_opencv >= h1) | (H_opencv <= h2)
+
+                        ms = (S_opencv >= s1) & (S_opencv <= s2)
+                        mv = (V_opencv >= v1) & (V_opencv <= v2)
+
+                        return (mh & ms & mv).float()
+
+                    m1 = build_mask(
+                        self.hsv_params["H1_low"], 
+                        self.hsv_params["H1_high"],
+                        self.hsv_params["S1_low"], 
+                        self.hsv_params["S1_high"],
+                        self.hsv_params["V1_low"], 
+                        self.hsv_params["V1_high"]
+                    )
+                    m2 = build_mask(
+                        self.hsv_params["H2_low"], 
+                        self.hsv_params["H2_high"],
+                        self.hsv_params["S2_low"], 
+                        self.hsv_params["S2_high"],
+                        self.hsv_params["V2_low"], 
+                        self.hsv_params["V2_high"]
+                    )
+
+                    mask = ((m1 + m2) > 0).float()
+
+                    # -------------------------
+                    # 4) 可选：高斯模糊
+                    # -------------------------
+                    if self.gaussian_checkbox.isChecked():
+                        gks = self.gaussian_kernel_size
+                        mask = K.filters.gaussian_blur2d(mask, (gks, gks), (0.0, 0.0))
+
+                    # -------------------------
+                    # 5) 形态学去噪
+                    # -------------------------
+                    if self.dust_checkbox.isChecked():
+                        kern = torch.ones(
+                            (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
+                            device=mask.device,
+                        )
+                        bin_mask = (mask > 0.5).float()
+                        bin_mask = K.morphology.dilation(bin_mask, kern)
+                        bin_mask = K.morphology.erosion(bin_mask, kern)
+                        mask = bin_mask
+
+                    # -------------------------
+                    # 6) 输出模式
+                    # -------------------------
                     mask_3 = torch.cat([mask, mask, mask], dim=1)
-                    white = torch.ones_like(t)
-                    cleaned_t = t * mask_3 + white * (1 - mask_3)
-                elif self.output_mode == 1:
-                    mask_3 = torch.cat([mask, mask, mask], dim=1)
-                    cleaned_t = t * mask_3
-                else:
-                    cleaned_t = torch.cat([mask, mask, mask], dim=1)
 
-                cleaned_np = (
-                    (cleaned_t.clamp(0.0, 1.0) * 255.0)
-                    .to(dtype=torch.uint8)
-                    .squeeze(0)
-                    .permute(1, 2, 0)
-                    .cpu()
-                    .numpy()
-                )
-                cleaned_bgr = cleaned_np[..., ::-1]  # RGB -> BGR
+                    if self.output_mode == 0:
+                        white = torch.ones_like(t)
+                        cleaned_t = t * mask_3 + white * (1 - mask_3)
+                    elif self.output_mode == 1:
+                        cleaned_t = t * mask_3
+                    else:
+                        cleaned_t = mask_3
 
-                del t, hsv, mask
+                    # -------------------------
+                    # 7) GPU → CPU NumPy
+                    # -------------------------
+                    cleaned_np = (
+                        (cleaned_t.clamp(0, 1) * 255.0)
+                        .byte()
+                        .squeeze(0)
+                        .permute(1, 2, 0)
+                        .cpu()
+                        .numpy()
+                    )
+                    cleaned_bgr = cleaned_np[..., ::-1]
+
+                # -------------------------
+                # 🔥 显存回收
+                # -------------------------
+                del t, hsv, hsv_cv, m1, m2, mask, mask_3
+                if 'bin_mask' in locals():
+                    del bin_mask
+                if 'cleaned_t' in locals():
+                    del cleaned_t
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+
                 return cleaned_bgr
 
             except Exception as e:
                 print("GPU processing failed, fallback to CPU. Reason:", e)
 
-        # 回退到 CPU（保持你已有的 process_image_cpu 逻辑）
+                try:
+                    if hasattr(self, "compute_device_combo") and self.compute_device_combo is not None:
+                        self.compute_device_combo.setCurrentIndex(1)
+                except:
+                    pass
+
+        # -------------------------
+        # CPU fallback
+        # -------------------------
         try:
             return self.process_image_cpu(target_img)
         except Exception as e:
             print("CPU processing also failed:", e)
             return None
-
-
-    # def process_image(self, img: Optional[np.ndarray] = None):
-    #     """
-    #     Dispatch: 如果检测到 PyTorch+CUDA 则使用 GPU 实现（via Kornia），否则使用原有 CPU 实现（保留原逻辑）。
-    #     这样最小改动即可在有合适环境时自动使用 NVIDIA GPU。
-    #     """
-    #     # 如果传入 img，直接使用传入的，否则用 self.img（与原逻辑一致）
-    #     target_img = img if img is not None else self.img
-
-    #     if target_img is None:
-    #         return target_img
-
-    #     # 优先使用 PyTorch+Kornia 在 GPU 上运行（若可用）
-        
-    #     if TORCH_GPU_AVAILABLE:
-    #         print("🔍 检测到 PyTorch+CUDA，尝试使用 GPU 加速处理图像..."  )
-    #         print(f"当前显存占用: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-    #         print(f"显存总量: {torch.cuda.get_device_properties(0).total_memory / 1024**2:.2f} MB")
-    #         torch.cuda.set_per_process_memory_fraction(0.8)  # 限制为 80%
-    #         try:
-    #             # 将 BGR numpy 转为 RGB torch.Tensor, float32, 0..1，然后上 GPU
-    #             rgb = target_img[..., ::-1].copy()  # BGR->RGB
-    #             t = (
-    #                 torch.from_numpy(rgb)
-    #                 .to(dtype=torch.float32)
-    #                 .permute(2, 0, 1)
-    #                 .unsqueeze(0)
-    #                 / 255.0
-    #             )
-    #             t = t.cuda()
-
-    #             # 1) RGB -> HSV (Kornia 返回 H in [0,1] representing 0..360°, S,V in [0,1])
-    #             hsv = K.color.rgb_to_hsv(t)
-
-    #             # 2) 构造掩码：将你的参数从原范围映射到 kornia 的范围
-    #             # H：原来 0..180 -> 0..1  映射: h/180
-    #             # S,V：原来 0..255 -> 0..1  映射: s/255, v/255
-    #             H = hsv[:, 0:1, :, :]
-    #             S = hsv[:, 1:2, :, :]
-    #             V = hsv[:, 2:3, :, :]
-
-    #             # 构建两段阈值掩码（注意 H 的环绕 0/180 情况）
-    #             # 修复 H 值映射问题
-    #             def hsv_mask_range(h_low, h_high, s_low, s_high, v_low, v_high):
-    #                 h_low_f = h_low / 180.0  # 映射到 [0, 1]
-    #                 h_high_f = h_high / 180.0  # 映射到 [0, 1]
-    #                 s_low_f = s_low / 255.0
-    #                 s_high_f = s_high / 255.0
-    #                 v_low_f = v_low / 255.0
-    #                 v_high_f = v_high / 255.0
-
-    #                 if h_low_f <= h_high_f:
-    #                     mh = (H >= h_low_f) & (H <= h_high_f)
-    #                 else:
-    #                     # 环绕情况，例如 170..180 和 0..10
-    #                     mh = (H >= h_low_f) | (H <= h_high_f)
-
-    #                 ms = (S >= s_low_f) & (S <= s_high_f)
-    #                 mv = (V >= v_low_f) & (V <= v_high_f)
-    #                 return (mh & ms & mv).to(dtype=torch.float32)
-
-    #             m1 = hsv_mask_range(
-    #                 self.hsv_params["H1_low"],
-    #                 self.hsv_params["H1_high"],
-    #                 self.hsv_params["S1_low"],
-    #                 self.hsv_params["S1_high"],
-    #                 self.hsv_params["V1_low"],
-    #                 self.hsv_params["V1_high"],
-    #             )
-    #             m2 = hsv_mask_range(
-    #                 self.hsv_params["H2_low"],
-    #                 self.hsv_params["H2_high"],
-    #                 self.hsv_params["S2_low"],
-    #                 self.hsv_params["S2_high"],
-    #                 self.hsv_params["V2_low"],
-    #                 self.hsv_params["V2_high"],
-    #             )
-    #             mask = ((m1 + m2) > 0).to(dtype=torch.float32)  # 0/1 mask float
-
-    #             # 可选：高斯模糊（Kornia 提供 gaussian blur）
-    #             if self.gaussian_checkbox.isChecked():
-    #                 # ksize 必须为奇数，这里根据 self.gaussian_kernel_size
-    #                 gks = self.gaussian_kernel_size
-    #                 mask = K.filters.gaussian_blur2d(mask, (gks, gks), (0.0, 0.0))
-
-    #             # 可选：形态学去噪（Kornia 有形态学函数）
-    #             if self.dust_checkbox.isChecked():
-    #                 # 先二值化并做开/闭运算（迭代次数可调整）
-    #                 bin_mask = (mask > 0.5).to(dtype=torch.float32)
-    #                 # 这里用腐蚀/膨胀近似开/闭
-    #                 kern = torch.ones(
-    #                     (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
-    #                     device=bin_mask.device,
-    #                 )
-    #                 # 你可以用 kornia.morphology.erode/dilate if available; 下为示意：
-    #                 bin_mask = K.morphology.dilation(bin_mask, kern)
-    #                 bin_mask = K.morphology.erosion(bin_mask, kern)
-    #                 mask = bin_mask
-
-    #             # 根据 output_mode 生成 cleaned（在 GPU 上）
-    #             if self.output_mode == 0:
-    #                 # 白底红字：把 rgb * mask + white*(1-mask)
-    #                 colored = t * mask
-    #                 white = torch.ones_like(colored)
-    #                 cleaned_t = colored + white * (1.0 - mask)
-    #             elif self.output_mode == 1:
-    #                 # 叠加模式：直接把红色通道保留到背景
-    #                 red_only = t * mask
-    #                 cleaned_t = red_only + torch.ones_like(t) * 0.0  # adjust as needed
-    #             else:
-    #                 # 掩码模式：把 mask 转成三通道灰度
-    #                 cleaned_t = torch.cat([mask, mask, mask], dim=1)
-
-    #             # 转回 numpy BGR uint8
-    #             cleaned_t = (
-    #                 (cleaned_t.clamp(0.0, 1.0) * 255.0)
-    #                 .to(dtype=torch.uint8)
-    #                 .squeeze(0)
-    #                 .permute(1, 2, 0)
-    #                 .cpu()
-    #                 .numpy()
-    #             )
-    #             cleaned_bgr = cleaned_t[..., ::-1]  # RGB->BGR
-    #             del t, hsv, mask  # 删除不再需要的张量
-    #             torch.cuda.empty_cache()  # 清理显存
-    #             return cleaned_bgr
-
-    #         except Exception as e:
-    #             # 若 GPU 路径失败则回退到 CPU 路径（并打印原因）
-    #             print("GPU processing failed, fallback to CPU. Reason:", e)
-
-    #     print(f"当前显存占用: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-    #     print(f"显存总量: {torch.cuda.get_device_properties(0).total_memory / 1024**2:.2f} MB")
-
-    #     # 回退：调用原有 CPU 实现（保留你原先的代码逻辑）
-    #     # 注意：这里假定你的原 process_image CPU 逻辑已移动到一个方法 process_image_cpu
-    #     print("🔍 没有检测到 PyTorch+CUDA，尝试使用 CPU 加速处理图像..."  )
-    #     try:
-    #         return self.process_image_cpu(img)
-    #     except Exception:
-    #         # 如果没有拆分函数（原实现在本函数），直接保持原实现（或者复制原实现代码到 process_image_cpu）
-    #         return None
 
     def process_image_cpu(self, img: Optional[np.ndarray] = None):
         # 如果传入了 img，则用传入的；否则用 self.img（兼容实时处理）
@@ -1169,6 +1053,25 @@ class HSVImageEditor(QMainWindow):
         zoom_group.setLayout(zoom_inner_layout)
         gaussian_layout.addWidget(zoom_group)
 
+        # ✅ 新增：当前计算硬件显示（只读，下拉框形式）
+        compute_group = QGroupBox("当前计算硬件：")
+        compute_layout = QHBoxLayout()
+        self.compute_device_combo = QComboBox()
+        self.compute_device_combo.addItems(["显卡", "CPU"])
+        # 默认根据 TORCH_GPU_AVAILABLE 设置显示
+        try:
+            if TORCH_GPU_AVAILABLE:
+                self.compute_device_combo.setCurrentIndex(0)
+            else:
+                self.compute_device_combo.setCurrentIndex(1)
+        except Exception:
+            self.compute_device_combo.setCurrentIndex(1)
+        # 只作为状态显示，不允许用户修改
+        self.compute_device_combo.setEnabled(False)
+        compute_layout.addWidget(self.compute_device_combo)
+        compute_group.setLayout(compute_layout)
+        gaussian_layout.addWidget(compute_group)
+
         params_layout.addLayout(gaussian_layout)
         # -----------------------------------------
         # ✅ 新增：锐化处理开关复选框
@@ -1256,7 +1159,9 @@ class HSVImageEditor(QMainWindow):
 
             # --- 直接调用处理函数 ---
             cleaned = self.process_image(img)
-
+            #如果当前使用硬件是gpu，处理完释放显存
+            if TORCH_GPU_AVAILABLE:
+                torch.cuda.empty_cache()  # 每张图处理完释放显存
             # --- 保存结果 ---
             name, _ = os.path.splitext(filename)
             save_path = os.path.join(self.output_folder, f"{name}.png")
