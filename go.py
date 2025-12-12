@@ -15,9 +15,17 @@ try:
     os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
     if TORCH_GPU_AVAILABLE:
         torch.cuda.set_per_process_memory_fraction(0.8)  # 限制使用 80% 显存
+    # 优化 CUDA 内存配置
+    os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
+    if TORCH_GPU_AVAILABLE:
+        torch.cuda.set_per_process_memory_fraction(0.8)  # 限制使用 80% 显存
 except Exception:
     TORCH_GPU_AVAILABLE = False
 
+# 移除 expandable_segments，改用更兼容的内存配置
+os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
+# 限制 PyTorch CUDA 内存使用比例（避免占满显存）
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 # 移除 expandable_segments，改用更兼容的内存配置
 os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
 # 限制 PyTorch CUDA 内存使用比例（避免占满显存）
@@ -440,13 +448,13 @@ class HSVImageEditor(QMainWindow):
             raise ValueError(f"❌ 无法读取图片：{img_path}")
 
         # 限制图片最大尺寸（例如宽高不超过4096）
-        max_size = 4096
-        h, w = img.shape[:2]
-        if max(h, w) > max_size:
-            scale = max_size / max(h, w)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # max_size = 4096
+        # h, w = img.shape[:2]
+        # if max(h, w) > max_size:
+        #     scale = max_size / max(h, w)
+        #     new_w = int(w * scale)
+        #     new_h = int(h * scale)
+        #     img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         hsv = cv2.cvtColor(
             img, cv2.COLOR_BGR2RGB
@@ -822,6 +830,8 @@ class HSVImageEditor(QMainWindow):
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_img.shape
         bytes_per_line = ch * w
+        # 使用 QImage 的 Copy 模式，避免内存引用问题
+        qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         # 使用 QImage 的 Copy 模式，避免内存引用问题
         qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         return QPixmap.fromImage(qimg)
