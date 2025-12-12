@@ -1,23 +1,9 @@
 import cv2
 import numpy as np
 import os
-from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSlider,
-    QLabel,
-    QPushButton,
-    QGroupBox,
-    QGridLayout,
-    QSplitter,
-    QSizePolicy,
-    QCheckBox,
-)
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent, QResizeEvent
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 from typing import Optional
 
 try:
@@ -25,12 +11,17 @@ try:
     import kornia as K
 
     TORCH_GPU_AVAILABLE = torch.cuda.is_available()
+    # 优化 CUDA 内存配置
+    os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
+    if TORCH_GPU_AVAILABLE:
+        torch.cuda.set_per_process_memory_fraction(0.8)  # 限制使用 80% 显存
 except Exception:
     TORCH_GPU_AVAILABLE = False
 
-# ⚡ 建议提前设置 PyTorch 可扩展内存，减少碎片化
-os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
-
+# 移除 expandable_segments，改用更兼容的内存配置
+os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
+# 限制 PyTorch CUDA 内存使用比例（避免占满显存）
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 # ----------------- 参数说明 -----------------
 # LowH1 / HighH1 : 第1段红色的色调范围（Hue）
 #   - 建议范围：0–10
@@ -57,26 +48,6 @@ os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:Tr
 #   - 调节目标：同上，控制明暗阈值
 #
 # -------------------------------------------
-import cv2
-import numpy as np
-import os
-from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSlider,
-    QLabel,
-    QPushButton,
-    QGroupBox,
-    QGridLayout,
-    QSplitter,
-    QComboBox,
-)
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeyEvent
-from typing import Optional
 
 
 class HSVImageEditor(QMainWindow):
@@ -327,7 +298,7 @@ class HSVImageEditor(QMainWindow):
         # HSV 默认参数
         self.hsv_params = {
             "H1_low": 0,
-            "H1_high": 10,
+            "H1_high": 80,
             "S1_low": 80,
             "S1_high": 255,
             "V1_low": 80,
@@ -355,7 +326,7 @@ class HSVImageEditor(QMainWindow):
         self.update_hue_preview()
         # 定时刷新
         self.timer = QTimer()
-        self.timer.setInterval(500)
+        self.timer.setInterval(1000)
         self.timer.timeout.connect(self.update_preview)
         self.timer.start()
         self.update_preview()  # 添加此行确保初始加载时显示预览条
@@ -467,11 +438,22 @@ class HSVImageEditor(QMainWindow):
         img: np.ndarray = cv2.imread(img_path)
         if img is None:
             raise ValueError(f"❌ 无法读取图片：{img_path}")
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        # 限制图片最大尺寸（例如宽高不超过4096）
+        max_size = 4096
+        h, w = img.shape[:2]
+        if max(h, w) > max_size:
+            scale = max_size / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        hsv = cv2.cvtColor(
+            img, cv2.COLOR_BGR2RGB
+        )  # 注意：原代码是BGR2HSV，这里保持一致
         return img, hsv
 
     def process_image(self, img: Optional[np.ndarray] = None):
-        import os
         # 尝试设置 PyTorch 的可扩展 segment allocator，显著降低碎片（若已设置则不覆盖）
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -483,6 +465,7 @@ class HSVImageEditor(QMainWindow):
         try:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()  # 等待GPU操作完成
         except Exception:
             pass
 
@@ -492,18 +475,14 @@ class HSVImageEditor(QMainWindow):
             输入：H x W x BGR numpy uint8
             返回：H x W x BGR numpy uint8（处理结果）
             """
-            # 下面的实现和你已验过的 pipeline 一致，但做了更稳健的局部变量管理
-            rgb = np_img[..., ::-1].copy()
-            t = (
-                torch.from_numpy(rgb)
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-                .cuda()
-                .half()
-                / 255.0
-            )  # [1,3,H,W]
 
             try:
+                # 下面的实现和你已验过的 pipeline 一致，但做了更稳健的局部变量管理
+                rgb = np_img[..., ::-1].copy()
+                t = (
+                    torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).cuda().half()
+                    / 255.0
+                )  # [1,3,H,W]
                 # RGB -> HSV
                 hsv = K.color.rgb_to_hsv(t)  # [1,3,H,W]
                 H = hsv[:, 0:1, :, :]
@@ -533,14 +512,20 @@ class HSVImageEditor(QMainWindow):
                     return (mh & ms & mv).float()
 
                 m1 = build_mask_local(
-                    self.hsv_params["H1_low"], self.hsv_params["H1_high"],
-                    self.hsv_params["S1_low"], self.hsv_params["S1_high"],
-                    self.hsv_params["V1_low"], self.hsv_params["V1_high"],
+                    self.hsv_params["H1_low"],
+                    self.hsv_params["H1_high"],
+                    self.hsv_params["S1_low"],
+                    self.hsv_params["S1_high"],
+                    self.hsv_params["V1_low"],
+                    self.hsv_params["V1_high"],
                 )
                 m2 = build_mask_local(
-                    self.hsv_params["H2_low"], self.hsv_params["H2_high"],
-                    self.hsv_params["S2_low"], self.hsv_params["S2_high"],
-                    self.hsv_params["V2_low"], self.hsv_params["V2_high"],
+                    self.hsv_params["H2_low"],
+                    self.hsv_params["H2_high"],
+                    self.hsv_params["S2_low"],
+                    self.hsv_params["S2_high"],
+                    self.hsv_params["V2_low"],
+                    self.hsv_params["V2_high"],
                 )
 
                 mask = ((m1 + m2) > 0).float()
@@ -605,13 +590,15 @@ class HSVImageEditor(QMainWindow):
                             except Exception:
                                 pass
                 try:
+                    torch.cuda.empty_cache()
                     torch.cuda.synchronize()
                 except Exception:
                     pass
-                torch.cuda.empty_cache()
 
         # 内部：tile 分块处理函数（当单次处理 OOM 时回退使用）
-        def process_image_tilewise(np_img: np.ndarray, tile_size: int = 2048, overlap: int = 0) -> np.ndarray:
+        def process_image_tilewise(
+            np_img: np.ndarray, tile_size: int = 1024, overlap: int = 0
+        ) -> np.ndarray:
             """
             将大图切成 tile（不重叠或带少量 overlap），逐块调用 gpu_process_numpy_image，并拼回。
             tile_size 建议 1024/1536/2048 等，根据显存调整；默认 2048 对 6GB 显存通常稳妥。
@@ -619,8 +606,12 @@ class HSVImageEditor(QMainWindow):
             """
             h, w = np_img.shape[:2]
             # compute tile coordinates (non-overlapping except optional overlap)
-            ys = list(range(0, h, tile_size - overlap if tile_size > overlap else tile_size))
-            xs = list(range(0, w, tile_size - overlap if tile_size > overlap else tile_size))
+            ys = list(
+                range(0, h, tile_size - overlap if tile_size > overlap else tile_size)
+            )
+            xs = list(
+                range(0, w, tile_size - overlap if tile_size > overlap else tile_size)
+            )
 
             out = np.zeros_like(np_img)
             for y in ys:
@@ -646,7 +637,7 @@ class HSVImageEditor(QMainWindow):
 
         # 判断图片是否过大：超过此尺寸直接 tile 处理
         H_img, W_img = target_img.shape[:2]
-        IS_LARGE = max(H_img, W_img) >= 2000    # 建议阈值：3500~4000
+        IS_LARGE = max(H_img, W_img) >= 2000  # 建议阈值：3500~4000
         # 尝试单次整体 GPU 处理；若失败则走 tile 分块策略
         if TORCH_GPU_AVAILABLE:
             try:
@@ -666,7 +657,9 @@ class HSVImageEditor(QMainWindow):
                     # 大图，直接走 tile 分块处理
                     print("大图检测到，直接使用 tile 分块 GPU 处理...")
                     try:
-                        result = process_image_tilewise(target_img, tile_size=2048, overlap=0)
+                        result = process_image_tilewise(
+                            target_img, tile_size=2048, overlap=0
+                        )
                         return result
                     except RuntimeError as e:
                         print("Tilewise GPU processing failed:", e)
@@ -676,11 +669,17 @@ class HSVImageEditor(QMainWindow):
                 print("GPU 处理失败, fallback. Reason:", msg)
 
                 # 如果是 GPU OOM 或者 PyTorch 分配问题，尝试 tile 分块处理
-                if "out of memory" in msg.lower() or "tried to allocate" in msg.lower() or "memory" in msg.lower():
+                if (
+                    "out of memory" in msg.lower()
+                    or "tried to allocate" in msg.lower()
+                    or "memory" in msg.lower()
+                ):
                     # 在这里尝试更保守的 tile_size（6GB GPU 上 2048 通常稳妥）
                     try:
                         print("尝试切割小图处理...")
-                        result = process_image_tilewise(target_img, tile_size=2048, overlap=0)
+                        result = process_image_tilewise(
+                            target_img, tile_size=2048, overlap=0
+                        )
                         return result
                     except Exception as e2:
                         print("Tilewise GPU processing also failed:", e2)
@@ -704,8 +703,6 @@ class HSVImageEditor(QMainWindow):
         except Exception as e:
             print("CPU processing also failed:", e)
             return None
-
-
 
     def process_image_cpu(self, img: Optional[np.ndarray] = None):
         # 如果传入了 img，则用传入的；否则用 self.img（兼容实时处理）
@@ -809,14 +806,24 @@ class HSVImageEditor(QMainWindow):
             # 恢复默认光标
             QApplication.restoreOverrideCursor()
 
-
     def cv2_to_qpixmap(self, cv_img):
         if cv_img is None or cv_img.size == 0 or cv_img.dtype != np.uint8:
             return QPixmap()
-        rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)  # 关键：BGR转RGB
+
+        # 限制 QImage 最大尺寸（避免渲染超大图片）
+        # max_render_size = 2048
+        # h, w = cv_img.shape[:2]
+        # if max(h, w) > max_render_size:
+        #     scale = max_render_size / max(h, w)
+        #     new_w = int(w * scale)
+        #     new_h = int(h * scale)
+        #     cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_img.shape
         bytes_per_line = ch * w
-        qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        # 使用 QImage 的 Copy 模式，避免内存引用问题
+        qimg = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         return QPixmap.fromImage(qimg)
 
     def on_slider_value_update(self, slider_name, value):
@@ -1245,9 +1252,10 @@ class HSVImageEditor(QMainWindow):
 
             # --- 直接调用处理函数 ---
             cleaned = self.process_image(img)
-            #如果当前使用硬件是gpu，处理完释放显存
+            # 如果当前使用硬件是gpu，处理完释放显存
             if TORCH_GPU_AVAILABLE:
                 torch.cuda.empty_cache()  # 每张图处理完释放显存
+                torch.cuda.synchronize()
             # --- 保存结果 ---
             name, _ = os.path.splitext(filename)
             save_path = os.path.join(self.output_folder, f"{name}.png")
