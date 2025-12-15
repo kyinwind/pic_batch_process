@@ -5,6 +5,8 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from typing import Optional
+import time
+import logging
 
 try:
     import torch
@@ -21,6 +23,19 @@ try:
         torch.cuda.set_per_process_memory_fraction(0.8)  # 限制使用 80% 显存
 except Exception:
     TORCH_GPU_AVAILABLE = False
+
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # 控制台输出
+        logging.FileHandler("image_processing.log", encoding="utf-8")  # 文件输出
+    ]
+)
+logger = logging.getLogger("ImageProcessor")
+
 
 # 移除 expandable_segments，改用更兼容的内存配置
 os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:128"
@@ -318,27 +333,28 @@ class HSVImageEditor(QMainWindow):
             "V2_low": 80,
             "V2_high": 255,
         }
-        # 1. 先加载图像
-        self.img, self.hsv = self.load_image(self.img_index)
 
-        # 2. 先初始化UI
+        # 1. 先初始化UI
         self.init_ui()
-        # 3. 生成色调预览图
+        # 2. 生成色调预览图
         self.hue_preview_img = self.create_hue_preview_image().astype(
             np.uint8
         )  # 生成H色调光谱图
         assert self.hue_preview_img.dtype == np.uint8, "图像数据类型错误！应为np.uint8"
-        # 4. 最后处理图像
-        self.update_processed_image()
-        self.update_preview()
+        # 3. 处理图像
+        #self.update_processed_image()
+        #self.update_preview()
+        self.refresh_image()
+        # 4. 显示色调预览
         self.update_hue_preview()
-        # 定时刷新
+        # 5. 定时刷新
         self.timer = QTimer()
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.update_preview)
         self.timer.start()
-        self.update_preview()  # 添加此行确保初始加载时显示预览条
-        self.update_hue_preview()
+        
+        #self.update_preview()  # 添加此行确保初始加载时显示预览条
+        #self.update_hue_preview()
 
     def update_hue_preview(self):
         if self.hue_preview_img is None:
@@ -356,7 +372,7 @@ class HSVImageEditor(QMainWindow):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.hue_preview_label.setPixmap(pixmap)
-
+    # 刷新显示预览图像
     def update_preview(self):
         if self.img is None:
             return  # 没有图像时不更新
@@ -553,13 +569,25 @@ class HSVImageEditor(QMainWindow):
                 # 形态学
                 bin_mask = None
                 if self.dust_checkbox.isChecked():
-                    kern = torch.ones(
-                        (1, 1, self.morph_kernel.shape[0], self.morph_kernel.shape[1]),
-                        device=mask.device,
-                    )
+                    # 1. 形态学开运算（先腐蚀后膨胀，打散小灰尘）
+                    kern_size_h, kern_size_w = self.morph_kernel.shape[0], self.morph_kernel.shape[1]
+                    kern = torch.ones((kern_size_h, kern_size_w), device=mask.device).float()
                     bin_mask = (mask > 0.5).float()
-                    bin_mask = K.morphology.dilation(bin_mask, kern)
+                    # 开运算 = 腐蚀 + 膨胀
                     bin_mask = K.morphology.erosion(bin_mask, kern)
+                    bin_mask = K.morphology.dilation(bin_mask, kern)
+                    
+                    # 2. 连通域面积过滤（核心：过滤小面积噪点）
+                    # 转换为 numpy 做连通域分析（kornia 连通域功能较复杂，numpy 更直观）
+                    bin_mask_np = bin_mask.squeeze(0).squeeze(0).cpu().numpy().astype(np.uint8) * 255
+                    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask_np, connectivity=8)
+                    filtered_mask = np.zeros_like(bin_mask_np)
+                    for i in range(1, num_labels):  # 跳过背景
+                        if stats[i, cv2.CC_STAT_AREA] > self.min_area:
+                            filtered_mask[labels == i] = 255
+                    
+                    # 转回 GPU 张量
+                    bin_mask = torch.from_numpy(filtered_mask).unsqueeze(0).unsqueeze(0).to(mask.device).float() / 255.0
                     mask = bin_mask
 
                 # 输出
@@ -819,13 +847,13 @@ class HSVImageEditor(QMainWindow):
             return QPixmap()
 
         # 限制 QImage 最大尺寸（避免渲染超大图片）
-        # max_render_size = 2048
-        # h, w = cv_img.shape[:2]
-        # if max(h, w) > max_render_size:
-        #     scale = max_render_size / max(h, w)
-        #     new_w = int(w * scale)
-        #     new_h = int(h * scale)
-        #     cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        max_render_size = 2048
+        h, w = cv_img.shape[:2]
+        if max(h, w) > max_render_size:
+            scale = max_render_size / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_img.shape
@@ -919,14 +947,16 @@ class HSVImageEditor(QMainWindow):
 
         group.setLayout(layout)
         return group
-
+    
     # ----------------- 新增方法 -----------------
     def on_image_selected(self, index):
+         # 如果索引和当前一致，直接返回，不重复处理
+        if index == self.img_index:
+            print("索引已经ok，直接返回")
+            return
         """当下拉框选择图片时切换"""
         self.img_index = index
-        self.img, self.hsv = self.load_image(self.img_index)
-        self.update_processed_image()
-        self.update_preview()
+        self.refresh_image()
         print(f"📂 已选择：{self.file_list[self.img_index]}")
 
     # --------------------------------------------
@@ -1226,28 +1256,40 @@ class HSVImageEditor(QMainWindow):
         value = self.kernel_size_slider.value()  # 释放后获取最终值
         self.morph_kernel = np.ones((value, value), np.uint8)  # 更新核大小
         self.kernel_size_value_label.setText(str(value))  # 更新数值显示
-        self.update_processed_image()  # 处理图像
+        self.refresh_image()  # 处理图像
 
     # 2. 最小连通面积滑块：释放时处理
     def on_min_area_release(self):
         value = self.min_area_slider.value()  # 释放后获取最终值
         self.min_area = value  # 更新面积阈值
         self.min_area_value_label.setText(str(value))  # 更新数值显示
-        self.update_processed_image()  # 处理图像
+        self.refresh_image()  # 处理图像
 
+    def refresh_image(self):
+        env_start = time.time()
+        self.img, self.hsv = self.load_image(self.img_index)
+        logger.info(f"refresh_image:load_image耗时: {time.time() - env_start:.4f}秒")
+        env_start = time.time()
+        self.update_processed_image()
+        logger.info(f"refresh_image:update_processed_image耗时: {time.time() - env_start:.4f}秒")
+        env_start = time.time()
+        self.update_preview()
+        logger.info(f"refresh_image:update_preview耗时: {time.time() - env_start:.4f}秒")
+    
     def switch_image(self, step):
         self.img_index = (self.img_index + step) % len(self.file_list)
-        self.img, self.hsv = self.load_image(self.img_index)
-        self.update_processed_image()
+        self.refresh_image()
         self.img_combo.setCurrentIndex(self.img_index)  # ✅ 让下拉框也更新
         print(f"🔄 切换到：{self.file_list[self.img_index]}")
+        self.show_toast(f"🔄 切换到：{self.file_list[self.img_index]}")
+        
 
     def switch_mode(self):
         self.output_mode = (self.output_mode + 1) % 3
         mode_names = ["白底红字", "叠加模式", "掩码模式"]
         self.mode_btn.setText(f"切换模式（当前：{mode_names[self.output_mode]}）")
         self.processed_label.setText(f"处理结果（{mode_names[self.output_mode]}）")
-        self.update_processed_image()
+        self.refresh_image()
 
     def batch_save(self):
         print("📤 开始批量保存...")
